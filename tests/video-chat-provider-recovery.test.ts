@@ -157,7 +157,11 @@ describe("video chat provider deadlines", () => {
     })).then((response) => response.json()).then((body) => { completed = true; return body; });
     await vi.advanceTimersByTimeAsync(3_000);
     expect(completed).toBe(action === "suggestions");
-    if (action === "speech") await vi.advanceTimersByTimeAsync(7_000);
+    if (action === "speech") {
+      await vi.advanceTimersByTimeAsync(26_999);
+      expect(completed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+    }
     expect(completed).toBe(true);
     expect(await result).toEqual(action === "suggestions" ? { suggestions: [] } : {
       error: { code: "speech_failed", message: "Speech could not be generated" },
