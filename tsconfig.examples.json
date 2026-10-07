@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@djoris/briefings": ["src/briefing/index.ts"],
+      "@djoris/briefings/react": ["src/briefing/react.ts"],
+      "@djoris/briefings/server": ["src/briefing/server.ts"],
+      "@djoris/briefings/styles.css": ["src/briefing/prompt-output.css"]
+    }
+  },
+  "include": ["examples"]
+}

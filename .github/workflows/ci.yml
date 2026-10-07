@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  VIDEO_CHAT_PAID_PROVIDERS: disabled
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-node
+      # Lint, types, example type-check, unused code, unit and API tests.
+      - run: npm run check
+      - run: npm run check:docs
+      - run: npm run build
+      - run: npm run build:sdk
+      # The package ships one runtime dependency; development toolchain
+      # advisories are tracked in docs/HANDOVER.md until it is upgraded.
+      - run: npm audit --audit-level=high --omit=dev
+
+  embed:
+    # The SDK component with recorded media in Chromium. The inherited
+    # cross-browser media matrix is available locally through `npm run verify`.
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.0-noble@sha256:baed2032d533817f3dbe6425de795788430ba345e819a1201337009ba17c9d07
+      options: --ipc=host
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-node
+      - name: Prepare workspace ownership
+        run: chown -R pwuser:pwuser "$GITHUB_WORKSPACE"
+      - name: Install a virtual audio output for narration
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+      - name: Run the embed specs
+        run: |
+          runuser -u pwuser -- bash -eu -c '
+            pulseaudio --start --exit-idle-time=-1
+            trap "pulseaudio --kill" EXIT
+            pactl load-module module-null-sink sink_name=cinematic_test
+            pactl set-default-sink cinematic_test
+            npx playwright test tests/app-browser/format-output.spec.ts tests/app-browser/hybrid-playback.spec.ts tests/app-browser/podcast-player.spec.ts tests/app-browser/article-view.spec.ts tests/app-browser/mobile-embed.spec.ts tests/app-browser/narration-recovery.spec.ts tests/app-browser/briefing-layout.spec.ts tests/app-browser/editorial-media.spec.ts --config app.playwright.config.ts --project=chromium
+          '
+      - name: Preserve browser evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: embed-evidence
+          path: test-results/
+          retention-days: 3

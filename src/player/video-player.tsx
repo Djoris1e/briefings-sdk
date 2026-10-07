@@ -1,0 +1,625 @@
+import { Soundtrack } from "./soundtrack.js";
+import type { SoundtrackPlayback } from "./buffer-soundtrack.js";
+import { isIosAudioOutput, resumeIosAudioContext } from "./ios-audio-output.js";
+import { MountedReadinessContext } from "./mounted-scene-readiness.js";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+} from "react";
+import type { VideoEvent } from "../protocol/events.js";
+import type { Video } from "../protocol/types.js";
+import {
+  applyVideoEvent,
+  createVideoState,
+  type VideoState,
+} from "../protocol/state.js";
+import { getDimensions } from "../visual-system/layout.js";
+import { VideoFrame } from "./video-frame.js";
+import { getVideoDuration, resolveVideoTimeline } from "../protocol/timeline.js";
+import { parseVideo } from "../protocol/persistence.js";
+import { preloadBuiltinTemplate } from "../visual-system/catalog/builtin-player.js";
+import { warmSceneMedia } from "./warm-scene-media.js";
+import { usePlaybackDiagnostics } from "./use-playback-diagnostics.js";
+import { resolvePlaybackPolicy } from "./playback-policy.js";
+import {
+  EndedOverlay,
+  GenerationCover,
+  PlayerControls,
+  StartPosterButton,
+} from "./player-controls.js";
+import { usePlaybackClock } from "./use-playback-clock.js";
+import type { VideoPlayerProps, VideoPlayerRuntimeProps } from "./video-player-types.js";
+
+export type { VideoPlaybackMode } from "./playback-policy.js";
+export type { VideoPlayerProps } from "./video-player-types.js";
+
+const MINIMUM_GENERATION_INTRO_MS = 3_000;
+
+function savedVideoState(video: Video): VideoState {
+  return {
+    ...createVideoState(),
+    status: "complete",
+    config: video,
+  };
+}
+
+type FullscreenMode = "none" | "native" | "fallback";
+
+export function VideoPlayerRuntime({
+  stream,
+  video,
+  playbackMode,
+  autoPlay = true,
+  startMuted = true,
+  muted: controlledMuted,
+  onMutedChange,
+  soundtrack,
+  soundtrackVolume,
+  nativeMediaAudio,
+  width,
+  orientation: orientationOverride,
+  responsiveBreakpoint = 520,
+  className,
+  style,
+  ariaLabel = "Video response",
+  controls = true,
+  paused,
+  loop = false,
+  onPlaybackEnd,
+  onComplete,
+  onError,
+  onSceneChange,
+  narrationReady,
+  narrationTime,
+  narrationActive,
+  onPlaybackMetric,
+  onFramePresented,
+  onMediaFramePresented,
+  onStallChange,
+  onStateChange,
+}: VideoPlayerRuntimeProps): ReactElement {
+  const nativeMediaVolume = Math.max(0, Math.min(1,
+    typeof nativeMediaAudio?.volume === "number" && Number.isFinite(nativeMediaAudio.volume)
+      ? nativeMediaAudio.volume
+      : 1,
+  ));
+  const [reducedMotion, setReducedMotion] = useState(() =>
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const { resolvedStartMuted, shouldAutoPlay, autoStartGeneration } = resolvePlaybackPolicy({
+    playbackMode,
+    autoPlay,
+    startMuted,
+    audioUnlocked,
+    reducedMotion,
+    hasStream: Boolean(stream),
+  });
+  const [isPlaying, setIsPlaying] = useState(() => shouldAutoPlay && !reducedMotion && !autoStartGeneration);
+  const [localMuted, setIsMuted] = useState(resolvedStartMuted);
+  const isMuted = controlledMuted ?? localMuted;
+  const [fullscreenMode, setFullscreenMode] = useState<FullscreenMode>("none");
+  const [state, setState] = useState<VideoState>(() => video ? savedVideoState(video) : createVideoState());
+  const [currentTime, setCurrentTime] = useState(0);
+  const savedActiveIndex = video ? resolveVideoTimeline(video).findIndex(range => currentTime >= range.start && currentTime < range.end) : -1;
+  const savedPreparationIndex = savedActiveIndex >= 0 ? savedActiveIndex : Math.max(0, (video?.scenes.length ?? 1) - 1);
+  useEffect(() => {
+    if (!video) return;
+    const controller = new AbortController();
+    for (const scene of video.scenes.slice(savedPreparationIndex, savedPreparationIndex + 2)) {
+      preloadBuiltinTemplate(scene.templateId);
+      warmSceneMedia(scene.variables, controller.signal);
+    }
+    return () => controller.abort();
+  }, [video, savedPreparationIndex]);
+  const [activeStream, setActiveStream] = useState(stream);
+  const [sourceRevision, setSourceRevision] = useState(0);
+  const [activeSavedVideo, setActiveSavedVideo] = useState(video);
+  const [replacementPending, setReplacementPending] = useState(false);
+  const [startRequested, setStartRequested] = useState(autoStartGeneration);
+  const [introPlaying, setIntroPlaying] = useState(autoStartGeneration);
+  const [generationIntroComplete, setGenerationIntroComplete] = useState(() => !playbackMode || !stream);
+  const [observedWidth, setObservedWidth] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  usePlaybackDiagnostics(containerRef, state.config ?? undefined, onPlaybackMetric);
+  const stateRef = useRef(state);
+  const timeRef = useRef(currentTime);
+  const audioRef = useRef<SoundtrackPlayback>(null);
+  const introStartedAtRef = useRef<number | null>(autoStartGeneration ? performance.now() : null);
+  const callbacksRef = useRef({ onComplete, onPlaybackEnd, onError, onSceneChange, narrationReady, narrationTime, narrationActive, onFramePresented, onMediaFramePresented, onStallChange, onStateChange });
+  const loopRef = useRef(loop);
+  const sceneIndexRef = useRef(-1);
+  const mediaFrameReportedRef = useRef(false);
+  const visualReadyRef = useRef<string | undefined>(undefined);
+  const activeMediaRef = useRef<{ key: string; video: HTMLVideoElement } | undefined>(undefined);
+  const reportVisualReady = useMemo(() => (key: string, error?: Error, actualVideoFrame = false, media?: HTMLVideoElement) => {
+    activeMediaRef.current = !error && actualVideoFrame && media ? { key, video: media } : undefined;
+    if (error) {
+      setIsPlaying(false);
+      callbacksRef.current.onError?.(error, stateRef.current);
+    } else {
+      visualReadyRef.current = key;
+      if (actualVideoFrame && !mediaFrameReportedRef.current) {
+        mediaFrameReportedRef.current = true;
+        try { void Promise.resolve(callbacksRef.current.onMediaFramePresented?.()).catch(() => undefined); }
+        catch { /* Metrics cannot stop playback. */ }
+      }
+    }
+  }, []);
+  const playbackEndedRef = useRef(false);
+  let mediaPlaying = isPlaying;
+  // Decode the first frame before cueing narration. Once cued, do not spend
+  // the shot while the audio output is still waiting to start. The clock
+  // advances (and renders again) when the real narration onset arrives.
+  if (sceneIndexRef.current >= 0) {
+    try { mediaPlaying = isPlaying && narrationReady?.() !== false; }
+    catch { mediaPlaying = false; /* The clock reports callback failures. */ }
+  }
+
+
+  stateRef.current = state;
+  timeRef.current = currentTime;
+  callbacksRef.current = { onComplete, onPlaybackEnd, onError, onSceneChange, narrationReady, narrationTime, narrationActive, onFramePresented, onMediaFramePresented, onStallChange, onStateChange };
+  loopRef.current = loop;
+
+  const reportFramePresented = useMemo(() => {
+    let reported = false;
+    return () => {
+      if (reported) return;
+      reported = true;
+      try { void Promise.resolve(callbacksRef.current.onFramePresented?.()).catch(() => undefined); }
+      catch { /* Observers cannot stop playback. */ }
+    };
+  }, [stream, video]);
+
+  const primeSoundtrack = () => {
+    if (isIosAudioOutput()) { void resumeIosAudioContext(); return; }
+    const audio = audioRef.current;
+    if (!(audio instanceof HTMLAudioElement) || audio.dataset.audioOutput) return;
+    const Context = window.AudioContext
+      ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Context) return;
+    const context = new Context();
+    // Resume inside the gesture that triggered this. iOS only unlocks audio
+    // synchronously from a user gesture, and everything after the dynamic
+    // import below runs too late to count as one.
+    const unlocked = context.resume().catch(Boolean);
+    void import("./control-visibility.js")
+      .then(async (output) => {
+        await unlocked;
+        // Routing an element through a context that is not running silences
+        // it outright: its audio stops going to the speakers and starts
+        // going into a stalled graph. Playing directly is the safe answer —
+        // the volume ramp is worth less than audible sound.
+        if (context.state !== "running") {
+          void context.close();
+          return;
+        }
+        output.default(audio, context);
+      })
+      .catch(() => context.close());
+  };
+
+  if (stream !== activeStream || video !== activeSavedVideo) {
+    const autoStartReplacement = Boolean(playbackMode && stream && shouldAutoPlay && !reducedMotion);
+    setSourceRevision(value => value + 1);
+    setActiveStream(stream);
+    setActiveSavedVideo(video);
+    mediaFrameReportedRef.current = false;
+    activeMediaRef.current = undefined;
+    sceneIndexRef.current = -1;
+    setReplacementPending(stream != null);
+    setState(video ? savedVideoState(video) : createVideoState());
+    setCurrentTime(0);
+    setIsMuted(resolvedStartMuted);
+    setIsPlaying(shouldAutoPlay && !reducedMotion && !autoStartReplacement);
+    setStartRequested(autoStartReplacement);
+    setIntroPlaying(autoStartReplacement);
+    setGenerationIntroComplete(!playbackMode || !stream);
+    introStartedAtRef.current = autoStartReplacement ? performance.now() : null;
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = (event: MediaQueryListEvent) => {
+      setReducedMotion(event.matches);
+      if (event.matches) {
+        introStartedAtRef.current = null;
+        setStartRequested(false);
+        setIntroPlaying(false);
+        setIsPlaying(false);
+      }
+    };
+    preference.addEventListener?.("change", handleChange);
+    return () => preference.removeEventListener?.("change", handleChange);
+  }, []);
+
+  useEffect(() => {
+    import("./control-visibility.js");
+  }, []);
+
+  useEffect(() => setIsMuted(resolvedStartMuted), [resolvedStartMuted]);
+
+  /**
+   * The host's hand on the clock.
+   *
+   * Only a change acts, so a host that passes `paused={false}` alongside
+   * `autoPlay={false}` is not contradicted into playing on mount. The clock
+   * holds `timeRef` while it is stopped and restarts from `performance.now()`,
+   * so resuming continues rather than jumping.
+   */
+  const pausedRef = useRef(paused);
+  useEffect(() => {
+    const previous = pausedRef.current;
+    pausedRef.current = paused;
+    if (paused === undefined || paused === previous) return;
+    if (paused) {
+      setIsPlaying(false);
+      audioRef.current?.pause();
+      return;
+    }
+    const config = stateRef.current.config;
+    if (!config?.scenes.length) return;
+    // A finished video has its playhead at the end already. Releasing it there
+    // would hold a last frame and call it playback; starting over is a replay,
+    // which the host does by remounting.
+    if (timeRef.current >= getVideoDuration(config) - 0.001) return;
+    setIsPlaying(true);
+    const audio = audioRef.current;
+    if (audio?.paused) void audio.play().catch(Boolean);
+  }, [paused]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let started = false;
+    const reset = video ? savedVideoState(video) : createVideoState();
+    stateRef.current = reset;
+    timeRef.current = 0;
+    setState(reset);
+    setCurrentTime(0);
+
+    if (video) return;
+    if (!stream) return;
+
+    const consume = async () => {
+      try {
+        for await (const event of stream) {
+          if (cancelled) return;
+          const current = stateRef.current;
+          const next = applyVideoEvent(current, event);
+          stateRef.current = next;
+          setReplacementPending(false);
+          setState(next);
+          callbacksRef.current.onStateChange?.(next);
+          if (next.status === "complete" && current.status !== "complete") {
+            callbacksRef.current.onComplete?.(next);
+          } else if (next.status === "error" && current.status !== "error") {
+            callbacksRef.current.onError?.(new Error("Video response could not finish"), next);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          callbacksRef.current.onError?.(new Error("Video playback stream failed"), stateRef.current);
+        }
+      }
+    };
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      started = true;
+      void consume();
+    });
+    return () => {
+      cancelled = true;
+      if (started) {
+        (stream as AsyncIterable<VideoEvent> & { cancel?: () => void }).cancel?.();
+      }
+    };
+  }, [stream, video]);
+
+  useEffect(() => {
+    if (width != null) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const update = () => {
+      setObservedWidth(container.clientWidth);
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [width]);
+
+  usePlaybackClock({
+    isPlaying,
+    stateRef,
+    timeRef,
+    audioRef,
+    loopRef,
+    sceneIndexRef,
+    visualReadyRef,
+    activeMediaRef,
+    callbacksRef,
+    setCurrentTime,
+    setIsPlaying,
+  });
+
+  useEffect(() => {
+    if (!state.config?.scenes.length) {
+      const terminalWithoutVideo = state.status === "complete" || state.status === "error" || state.status === "aborted";
+      if (terminalWithoutVideo) {
+        audioRef.current?.pause();
+        introStartedAtRef.current = null;
+        setStartRequested(false);
+        setIntroPlaying(false);
+        setGenerationIntroComplete(true);
+      }
+      return;
+    }
+    if (!startRequested) return;
+
+    if (state.config.scenes[0]?.id === "supplied-opening") {
+      timeRef.current = 0;
+      setCurrentTime(0);
+      introStartedAtRef.current = null;
+      setStartRequested(false);
+      setIntroPlaying(false);
+      setGenerationIntroComplete(true);
+      setIsPlaying(true);
+      return;
+    }
+
+    const startedAt = introStartedAtRef.current ?? performance.now();
+    introStartedAtRef.current = startedAt;
+    const remaining = Math.max(0, MINIMUM_GENERATION_INTRO_MS - (performance.now() - startedAt));
+    const startGeneratedVideo = () => {
+      timeRef.current = 0;
+      setCurrentTime(0);
+      introStartedAtRef.current = null;
+      setStartRequested(false);
+      setIntroPlaying(false);
+      setGenerationIntroComplete(true);
+      setIsPlaying(true);
+    };
+    if (remaining <= 0) {
+      startGeneratedVideo();
+      return;
+    }
+    const timer = setTimeout(startGeneratedVideo, remaining);
+    return () => clearTimeout(timer);
+  }, [startRequested, state.config?.scenes.length, state.status]);
+
+  const streamOrientation = state.config?.orientation ?? "portrait";
+  const isFullscreen = fullscreenMode !== "none";
+  const responsiveWidth = isFullscreen ? window.innerWidth : width ?? observedWidth;
+  const orientation = orientationOverride === "auto"
+    ? responsiveWidth > 0
+      ? responsiveWidth <= responsiveBreakpoint ? "portrait" : "landscape"
+      : streamOrientation
+    : orientationOverride ?? streamOrientation;
+  const dimensions = getDimensions(orientation);
+  const displayWidth = (width ?? observedWidth) || dimensions.width;
+  const displayHeight = displayWidth * dimensions.height / dimensions.width;
+  const scale = displayWidth / dimensions.width;
+  const config = state.config;
+  const selectedSoundtrack = soundtrack === false ? undefined : soundtrack ?? config?.audio;
+  const displayConfig = config && config.orientation !== orientation
+    ? { ...config, orientation }
+    : config;
+  const duration = config ? getVideoDuration(config) : 0;
+  const terminal = state.status === "complete" || state.status === "error" || state.status === "aborted";
+  const playheadAtEnd = terminal && duration > 0 && currentTime >= duration;
+  const ended = !loop && playheadAtEnd;
+  useEffect(() => {
+    if (!playheadAtEnd) {
+      playbackEndedRef.current = false;
+      return;
+    }
+    if (loop || playbackEndedRef.current) return;
+    playbackEndedRef.current = true;
+    callbacksRef.current.onPlaybackEnd?.(stateRef.current);
+  }, [loop, playheadAtEnd]);
+  const generationIntroWaiting = Boolean(playbackMode && stream && !generationIntroComplete);
+  const firstSceneRange = config ? resolveVideoTimeline(config)[0] : undefined;
+  const hasSuppliedOpening = firstSceneRange?.scene.id === "supplied-opening";
+  const showStartPoster = (!generationIntroWaiting || hasSuppliedOpening) && !startRequested && !isPlaying && !ended && currentTime <= 0.001 && Boolean(config?.scenes.length);
+  const firstSceneHoldProgress = firstSceneRange
+    ? 0.7
+    : 0;
+  const posterTime = firstSceneRange
+    ? firstSceneRange.start + Math.max(0, firstSceneRange.end - firstSceneRange.start) * firstSceneHoldProgress
+    : currentTime;
+  const startPlayback = () => {
+    setGenerationIntroComplete(true);
+    containerRef.current?.setAttribute("data-touch-controls", "false");
+    const audio = audioRef.current;
+    if (audio) {
+      void audio.play()
+        .then(() => {
+          if (!audio.muted) setAudioUnlocked(true);
+        })
+        .catch(() => undefined);
+    }
+    setIsPlaying(true);
+  };
+  const armPlayback = () => {
+    introStartedAtRef.current = performance.now();
+    setStartRequested(true);
+    setIntroPlaying(true);
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    void audio.play()
+      .then(() => { if (!audio.muted) setAudioUnlocked(true); })
+      .catch(() => undefined);
+  };
+  const togglePlayback = () => {
+    if (startRequested) return;
+    if (!stateRef.current.config?.scenes.length) {
+      armPlayback();
+      return;
+    }
+    if (!isPlaying && ended) {
+      activeMediaRef.current = undefined;
+      sceneIndexRef.current = -1;
+      timeRef.current = 0;
+      setCurrentTime(0);
+      if (audioRef.current) audioRef.current.currentTime = 0;
+      startPlayback();
+      return;
+    }
+    if (isPlaying) setIsPlaying(false);
+    else startPlayback();
+  };
+  const toggleFullscreen = () => {
+    const container = containerRef.current;
+    if (!container) return;
+    void import("./control-visibility.js").then((output) => output.togglePlayerFullscreen(container, setFullscreenMode));
+  };
+  const pendingReplacement = replacementPending && state.status === "idle";
+  const displayedStatus = pendingReplacement ? "streaming" : state.status;
+  const generationCoverVisible = (generationIntroWaiting && !hasSuppliedOpening) || (displayedStatus === "streaming" && !config?.scenes.length);
+
+  return (
+    <div
+      ref={containerRef}
+      role="region"
+      aria-label={ariaLabel}
+      tabIndex={0}
+      onClickCapture={primeSoundtrack}
+      onKeyDownCapture={primeSoundtrack}
+      onKeyDown={(event) => {
+        if (event.target === event.currentTarget && (event.key === " " || event.key === "Enter")) {
+          event.preventDefault();
+          togglePlayback();
+        }
+      }}
+      data-testid="video-player"
+      data-status={displayedStatus}
+      data-finish-reason={state.finishReason}
+      data-scenes={config?.scenes.length ?? 0}
+      data-orientation={orientation}
+      data-current-time={currentTime.toFixed(3)}
+      data-playing={isPlaying || introPlaying}
+      data-ended={ended}
+      data-start-poster={showStartPoster}
+      data-start-requested={startRequested}
+      data-intro-playing={introPlaying}
+      data-generation-intro-complete={generationIntroComplete}
+      data-audio-unlocked={audioUnlocked}
+      data-playback-mode={playbackMode ?? "custom"}
+      data-fullscreen={fullscreenMode}
+      className={className}
+      style={{
+        width: width ?? "100%",
+        height: displayHeight,
+        position: "relative",
+        overflow: "hidden",
+        background: "#090712",
+        ...style,
+      }}
+    >
+      <GenerationCover
+        visible={generationCoverVisible}
+        config={config}
+        isMuted={isMuted}
+        startRequested={startRequested}
+        isPlaying={isPlaying}
+        onStart={armPlayback}
+      />
+      {!generationCoverVisible && config?.scenes.length ? (
+        <MountedReadinessContext.Provider value={reportVisualReady}>
+          <VideoFrame
+          onFramePresented={!showStartPoster && onFramePresented ? reportFramePresented : undefined}
+          config={displayConfig!}
+          time={showStartPoster ? posterTime : currentTime}
+          width={dimensions.width}
+          height={dimensions.height}
+          playing={mediaPlaying}
+          preparingNarration={isPlaying && !mediaPlaying}
+          narrationActive={narrationActive}
+          mediaAudioMuted={!nativeMediaAudio || isMuted}
+          mediaAudioAmbientOnly={nativeMediaAudio?.ambientOnly}
+          mediaAudioVolume={nativeMediaVolume}
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            transform: `scale(${scale})`,
+            transformOrigin: "top left",
+          }}
+        />
+        </MountedReadinessContext.Provider>
+      ) : null}
+      <StartPosterButton
+        visible={showStartPoster}
+        config={config}
+        isMuted={isMuted}
+        onStart={startPlayback}
+      />
+      <Soundtrack
+        key={sourceRevision}
+        audio={selectedSoundtrack}
+        audioRef={audioRef}
+        playing={isPlaying || introPlaying}
+        muted={isMuted}
+        volume={soundtrackVolume}
+        speaking={() => {
+          const scene = config?.scenes[sceneIndexRef.current];
+          return Boolean(scene && narrationActive?.(scene));
+        }}
+        time={currentTime}
+        duration={duration}
+        terminal={terminal && !loop}
+      />
+      <EndedOverlay ended={controls && ended} onReplay={togglePlayback} />
+      <PlayerControls
+        visible={controls && !generationCoverVisible && !showStartPoster && Boolean(config?.scenes.length)}
+        displayWidth={displayWidth}
+        ended={ended}
+        isPlaying={isPlaying}
+        isMuted={isMuted}
+        isFullscreen={isFullscreen}
+        hasAudio={Boolean(selectedSoundtrack) || Boolean(nativeMediaAudio)}
+        onTogglePlayback={togglePlayback}
+        onToggleMuted={() => {
+          if (isMuted) setAudioUnlocked(true);
+          if (controlledMuted === undefined) setIsMuted(!isMuted);
+          onMutedChange?.(!isMuted);
+        }}
+        onToggleFullscreen={toggleFullscreen}
+      />
+    </div>
+  );
+}
+
+export function VideoPlayer({
+  stream,
+  video,
+  onPlaybackEnd,
+  onComplete,
+  onError,
+  ...props
+}: VideoPlayerProps): ReactElement | null {
+  const savedVideo = useMemo(() => video ? parseVideo(video) : undefined, [video]);
+  if (!stream && !savedVideo) return null;
+  return <VideoPlayerRuntime
+    {...props}
+    stream={stream}
+    video={savedVideo}
+    onPlaybackEnd={(state) => {
+      if (state.config) onPlaybackEnd?.(state.config);
+    }}
+    onComplete={(state) => {
+      if (state.config) onComplete?.(state.config);
+    }}
+    onError={(error) => onError?.(error)}
+  />;
+}

@@ -1,0 +1,446 @@
+import { audioVolume, rampMediaVolume } from "../../player/audio-volume.js";
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type MediaRecoveryReason, useActiveNarration, useMediaAudio, useMediaFailure, useNarrationPreroll } from "./external-video-backdrop";
+import { resolveMediaPosition } from "./media-position";
+import { measuredClipPlayback, setClipRepeatCount } from "../../player/clip-repeat.js";
+import { IosVideoPoolContext, IosVideoSurface } from "../../player/ios-video-pool.js";
+
+export interface SceneVideoBackdropProps {
+  mediaUrl: string;
+  mediaPoster?: string;
+  mediaPosition?: string;
+  progress: number;
+  /** Prepared narration duration; quiet tails never require a repeat. */
+  sceneDuration?: number;
+  /** Fresh measured voice evidence supplied by client scene preparation. */
+  measuredSpeechDurationSec?: number;
+  /** Internal player-owned decoder priming, distinct from viewer pause. */
+  preparingNarration?: boolean;
+  isPlaying: boolean;
+  muted?: boolean;
+  volume?: number;
+  playbackId?: string;
+  onReady?: () => void;
+  onError?: () => void;
+}
+
+export const SceneVideoBackdrop: React.FC<SceneVideoBackdropProps> = ({
+  mediaUrl,
+  mediaPoster,
+  mediaPosition = "center",
+  progress,
+  sceneDuration,
+  measuredSpeechDurationSec,
+  preparingNarration = false,
+  isPlaying,
+  muted,
+  volume,
+  playbackId = mediaUrl,
+  onReady,
+  onError,
+}) => {
+  const videoPool = useContext(IosVideoPoolContext);
+  const mounted = useRef(true);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const inheritedAudio = useMediaAudio();
+  const reportMediaFailure = useMediaFailure();
+  const inheritedPreroll = useNarrationPreroll();
+  const narrationActive = useActiveNarration();
+  const liveNarratedKey = useRef<string | undefined>(undefined);
+  const rewindPreroll = preparingNarration || inheritedPreroll;
+  const [gainUnavailable, setGainUnavailable] = useState(false);
+  const resolvedMuted = (muted ?? inheritedAudio.muted) || gainUnavailable;
+  const resolvedVolume = volume ?? inheritedAudio.volume;
+  const resolvedPosition = resolveMediaPosition(mediaPosition);
+  const [decodedVideoUrl, setDecodedVideoUrl] = useState<string>();
+  const [waitingKey, setWaitingKey] = useState<string>();
+  const [exhaustedKey, setExhaustedKey] = useState<string>();
+  const [repeatingKey, setRepeatingKey] = useState<string>();
+  const [endedKey, setEndedKey] = useState<string>();
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const playbackRequest = useRef(0);
+  const playableVideoUrl = useRef<string | undefined>(undefined);
+  const startedVideoUrl = useRef<string | undefined>(undefined);
+  const startedPlaybackId = useRef<string | undefined>(undefined);
+  const videoPresentationKey = `${playbackId}\0${mediaUrl}`;
+
+  const presentationRef = useRef({ key: videoPresentationKey, playing: isPlaying, progress });
+  const failedPresentationRef = useRef<string | undefined>(undefined);
+  const repeatedPresentationRef = useRef<{ key: string; count: number; elapsedSeconds: number } | undefined>(undefined);
+  const previousProgressRef = useRef({ key: videoPresentationKey, progress });
+  presentationRef.current = { key: videoPresentationKey, playing: isPlaying, progress };
+  const liveSpeaking = () => {
+    try {
+      const active = narrationActive?.() === true;
+      if (active) liveNarratedKey.current = videoPresentationKey;
+      return active;
+    } catch { return false; }
+  };
+  const unavailable = (reason: MediaRecoveryReason = "playback-error") => {
+    if (mounted.current && presentationRef.current.key === videoPresentationKey && failedPresentationRef.current !== videoPresentationKey
+      && (presentationRef.current.playing || reason === "duration-mismatch")) {
+      failedPresentationRef.current = videoPresentationKey;
+      setExhaustedKey(videoPresentationKey);
+      onError?.();
+      reportMediaFailure?.(reason);
+    }
+  };
+  const pauseVideo = (video: HTMLVideoElement) => {
+    // WebKit can keep play() pending while frames advance. Our own pause
+    // cancels that request; its later rejection is not a decoder failure.
+    playbackRequest.current++;
+    video.pause();
+  };
+  const playVideo = (video: HTMLVideoElement) => {
+    const request = ++playbackRequest.current;
+    void video.play().catch(() => {
+      if (request === playbackRequest.current) unavailable();
+    });
+  };
+  useEffect(() => {
+    // Hidden preparation is bounded by mounted readiness once its cut is due.
+    // It must not spend the next scene's stall deadline while still incoming.
+    if (!isPlaying || rewindPreroll || waitingKey !== videoPresentationKey) {
+      if (waitingKey) setWaitingKey(undefined);
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+    const expectedSource = video.getAttribute("src") === mediaUrl ? video.src : undefined;
+    let awaitingPlayback = playableVideoUrl.current !== mediaUrl || video.currentSrc !== expectedSource;
+    let previousTime = video.currentTime;
+    let forwardFrames = 0;
+    let stopped = false;
+    let frame: number | undefined;
+    let poll: ReturnType<typeof setTimeout> | undefined;
+    const observe = (_now?: number, metadata?: VideoFrameCallbackMetadata) => {
+      if (stopped) return;
+      const currentSource = video.currentSrc === expectedSource;
+      if (currentSource && awaitingPlayback && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        playableVideoUrl.current = mediaUrl;
+        awaitingPlayback = false;
+        clearTimeout(deadline);
+        deadline = setTimeout(fail, 1000);
+      }
+      const time = metadata?.mediaTime ?? video.currentTime;
+      if (!currentSource || video.seeking || time < previousTime) forwardFrames = 0;
+      else if (time > previousTime + .001) forwardFrames++;
+      previousTime = time;
+      // One seek frame is not resumed motion. Require consecutive forward
+      // observations before releasing the original bounded stall deadline.
+      if (forwardFrames >= 2) {
+        playableVideoUrl.current = mediaUrl;
+        stopped = true;
+        clearTimeout(deadline);
+        setWaitingKey(undefined);
+        return;
+      }
+      if (video.requestVideoFrameCallback) frame = video.requestVideoFrameCallback(observe);
+      else poll = setTimeout(observe, 50);
+    };
+    // A seek can emit waiting without another playing event, even while frames
+    // resume. Keep the decoder visible and observe motion directly. A real
+    // stall gets the player's authored chapter instead of an endless spinner.
+    const fail = () => { if (!stopped) { stopped = true; unavailable(awaitingPlayback ? "frame-readiness-timeout" : "stalled-media"); } };
+    // Initial network/decode work has the same bound as mounted readiness.
+    // A decoded still with no future data is still cold, even after its first
+    // frame callback. Keep the short bound only after playback was available.
+    let deadline = setTimeout(fail, awaitingPlayback ? 8000 : 1000);
+    observe();
+    return () => {
+      stopped = true;
+      clearTimeout(deadline);
+      clearTimeout(poll);
+      if (frame !== undefined) video.cancelVideoFrameCallback?.(frame);
+    };
+  }, [waitingKey, videoPresentationKey, isPlaying, rewindPreroll]);
+
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    let stopped = false;
+    let frame: number | undefined;
+    const markPresented = () => {
+      if (stopped || !video.isConnected || presentationRef.current.key !== videoPresentationKey
+        || video.getAttribute("src") !== mediaUrl || video.currentSrc !== video.src
+        || failedPresentationRef.current === videoPresentationKey) return false;
+      if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) playableVideoUrl.current = mediaUrl;
+      video.dispatchEvent(new Event("briefings:video-frame-presented", { bubbles: true }));
+      onReadyRef.current?.();
+      setDecodedVideoUrl(mediaUrl);
+      stopped = true;
+      return true;
+    };
+    const observe = () => {
+      if (stopped || frame !== undefined) return;
+      if (video.requestVideoFrameCallback) {
+        frame = video.requestVideoFrameCallback(() => {
+          frame = undefined;
+          if (!markPresented()) observe();
+        });
+      } else if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) markPresented();
+    };
+    // A cached resource can finish loading while its Suspense tree is still
+    // detached. Observe the mounted frame even if loadeddata was missed.
+    video.addEventListener("loadeddata", observe);
+    observe();
+    return () => {
+      stopped = true;
+      video.removeEventListener("loadeddata", observe);
+      if (frame !== undefined) video.cancelVideoFrameCallback?.(frame);
+    };
+  }, [mediaUrl, videoPresentationKey]);
+
+  const allowsRepeat = (video: HTMLVideoElement) => {
+    const fit = measuredClipPlayback(measuredSpeechDurationSec, video.duration);
+    return fit !== undefined && fit.repeatCount > 0 && sceneDuration !== undefined
+      && Number.isFinite(sceneDuration) && sceneDuration > 0 && sceneDuration <= fit.durationSec + 1e-6;
+  };
+  const fitDuration = useCallback((video: HTMLVideoElement) => {
+    video.playbackRate = 1;
+    if (!narrationActive && sceneDuration && Number.isFinite(video.duration) && video.duration > 0 && sceneDuration > video.duration + .05 && !allowsRepeat(video)) {
+      pauseVideo(video);
+      unavailable("duration-mismatch");
+      return false;
+    }
+    return true;
+  }, [sceneDuration, measuredSpeechDurationSec, videoPresentationKey, narrationActive]);
+  useEffect(() => {
+    if (videoRef.current) fitDuration(videoRef.current);
+  }, [fitDuration]);
+  useEffect(() => {
+    if (!isPlaying || endedKey !== videoPresentationKey) return;
+    // Let the final clock tick commit, but never hold an exhausted outgoing
+    // clip indefinitely while the next scene is still cold.
+    const timer = setTimeout(() => {
+      if (videoRef.current?.ended) unavailable();
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [endedKey, videoPresentationKey, isPlaying]);
+  useEffect(() => {
+    if (!isPlaying || (repeatingKey !== videoPresentationKey && !narrationActive)) return;
+    let frame: number;
+    const observe = () => {
+      const video = videoRef.current;
+      const fit = video && measuredClipPlayback(measuredSpeechDurationSec, video.duration);
+      if (!video || presentationRef.current.progress >= 1) return;
+      if (narrationActive) {
+        if (!liveSpeaking() && liveNarratedKey.current === videoPresentationKey && repeatingKey === videoPresentationKey) { pauseVideo(video); return; }
+        frame = requestAnimationFrame(observe);
+        return;
+      }
+      const repeated = repeatedPresentationRef.current;
+      const elapsed = repeated?.key === videoPresentationKey ? repeated.elapsedSeconds : 0;
+      // Count all completed passes against the measurement, including after a
+      // seek. A stalled narration clock cannot purchase extra quiet footage.
+      if (!fit || fit.repeatCount === 0 || elapsed + video.currentTime > fit.durationSec + .05) {
+        unavailable("duration-mismatch");
+        return;
+      }
+      frame = requestAnimationFrame(observe);
+    };
+    frame = requestAnimationFrame(observe);
+    return () => cancelAnimationFrame(frame);
+  }, [repeatingKey, videoPresentationKey, isPlaying, measuredSpeechDurationSec, narrationActive]);
+  const finishMotion = () => {
+    if (!isPlaying) return;
+    const video = videoRef.current;
+    const fit = video && measuredClipPlayback(measuredSpeechDurationSec, video.duration);
+    const repeated = repeatedPresentationRef.current;
+    const count = repeated?.key === videoPresentationKey ? repeated.count : 0;
+    const elapsed = repeated?.key === videoPresentationKey ? repeated.elapsedSeconds : 0;
+    const speaking = liveSpeaking();
+    if (narrationActive && !speaking && liveNarratedKey.current === videoPresentationKey) {
+      setEndedKey(videoPresentationKey);
+      return;
+    }
+    // Native ended may precede the final animation-frame commit. A completed
+    // fitting line needs neither recovery nor a repeat during that last tick.
+    if ((!narrationActive || !speaking) && video?.ended && fit && sceneDuration !== undefined
+      && sceneDuration <= elapsed + video.duration + .05 && (1 - progress) * sceneDuration <= .05) {
+      setEndedKey(videoPresentationKey);
+      return;
+    }
+    if (video && video.ended && !video.error && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      && video.currentSrc === video.src && playableVideoUrl.current === mediaUrl
+      && failedPresentationRef.current !== videoPresentationKey && waitingKey !== videoPresentationKey
+      && (narrationActive ? speaking : fit && count < fit.repeatCount && elapsed + video.duration < fit.durationSec && allowsRepeat(video))
+      && progress < 1) {
+      repeatedPresentationRef.current = { key: videoPresentationKey, count: count + 1, elapsedSeconds: elapsed + video.duration };
+      setClipRepeatCount(video, count + 1);
+      setRepeatingKey(videoPresentationKey);
+      video.currentTime = 0;
+      // Every restart must prove resumed motion within the existing stall
+      // deadline, even when the browser omits a native waiting event.
+      setWaitingKey(videoPresentationKey);
+      playVideo(video);
+      return;
+    }
+    // Unknown measurements, exhausted budgets and unhealthy decoders retain
+    // the complete spoken line on a chapter.
+    unavailable();
+  };
+
+  useEffect(() => {
+    const previous = previousProgressRef.current;
+    previousProgressRef.current = { key: videoPresentationKey, progress };
+    const video = videoRef.current;
+    // Only an explicit backward playhead move rewinds this decoder. A pause,
+    // an ended clip, or an active/next promotion must never cause a replay.
+    if (!video || rewindPreroll || previous.key !== videoPresentationKey || progress >= previous.progress - .05
+      || !sceneDuration || !Number.isFinite(sceneDuration)) return;
+    const target = Math.max(0, progress * sceneDuration);
+    setEndedKey(undefined);
+    const fit = measuredClipPlayback(measuredSpeechDurationSec, video.duration);
+    const count = narrationActive && Number.isFinite(video.duration) && video.duration > 0 ? Math.floor(target / video.duration)
+      : allowsRepeat(video) && fit ? Math.min(fit.repeatCount, Math.floor(target / video.duration)) : 0;
+    const elapsedSeconds = count > 0 ? count * video.duration : 0;
+    setRepeatingKey(count > 0 ? videoPresentationKey : undefined);
+    repeatedPresentationRef.current = { key: videoPresentationKey, count, elapsedSeconds };
+    setClipRepeatCount(video, count);
+    if (progress <= .001) liveNarratedKey.current = undefined;
+    video.currentTime = target - elapsedSeconds;
+    failedPresentationRef.current = undefined;
+    setExhaustedKey(undefined);
+    if (isPlaying && video.paused) playVideo(video);
+  }, [progress, videoPresentationKey, sceneDuration, measuredSpeechDurationSec, rewindPreroll, isPlaying, narrationActive]);
+
+  useEffect(() => {
+    if (videoRef.current) setClipRepeatCount(videoRef.current, 0);
+  }, [videoPresentationKey]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    // React Strict Mode rehearses setup → cleanup → setup in development.
+    // The cleanup deliberately releases the decoder, so the repeated setup
+    // must restore the declarative source before the playback effect runs.
+    if (video.getAttribute("src") !== mediaUrl) {
+      video.setAttribute("src", mediaUrl);
+      video.load();
+    }
+  }, [mediaUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    // A source change already starts a native load via React's src update.
+    // Tear down the decoder only on unmount, never cancel that new request.
+    return () => {
+      // The pool releases in layout cleanup, before another scene can acquire
+      // this element. A later passive cleanup must not clear its new source.
+      if (!videoPool) {
+        pauseVideo(video);
+        video.removeAttribute("src");
+        video.load();
+      }
+      startedVideoUrl.current = undefined;
+      startedPlaybackId.current = undefined;
+    };
+  }, []);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (videoPool) {
+      // A reused sink has already passed the ramp helper's first-use check.
+      // Recheck its native gain before this lease can play audible footage.
+      const gain = audioVolume(resolvedVolume);
+      try { video.volume = gain; } catch { /* Fixed native volume stays muted. */ }
+      if (gain < 1 && video.volume > gain + .01) { video.muted = true; setGainUnavailable(true); }
+    }
+    return rampMediaVolume(video, resolvedVolume, () => setGainUnavailable(true));
+  }, [resolvedVolume]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (!isPlaying) {
+      pauseVideo(video);
+      // Keep silent prepared data intact through narration startup. Seeking
+      // back a few milliseconds can trigger another cold Range request.
+      if (rewindPreroll && !resolvedMuted && video.currentTime > 0) video.currentTime = 0;
+      return;
+    }
+    if (startedPlaybackId.current === playbackId) {
+      if (video.ended) finishMotion();
+      else playVideo(video);
+      return;
+    }
+    const changingSource = startedVideoUrl.current !== undefined && startedVideoUrl.current !== mediaUrl;
+    if (!fitDuration(video)) return;
+    if (!changingSource && video.currentTime > 0) video.currentTime = 0;
+    playVideo(video);
+    startedVideoUrl.current = mediaUrl;
+    startedPlaybackId.current = playbackId;
+  }, [isPlaying, mediaUrl, playbackId, rewindPreroll]);
+
+  const enforceRequestedPause = (video: HTMLVideoElement) => {
+    // WebKit may enter playback without a playing event while seeking or
+    // waiting. Both native start events must honor the latest requested hold.
+    if (presentationRef.current.playing) return;
+    pauseVideo(video);
+    // A late start can advance WebKit's decoded frames while its paused clock
+    // stays pinned. Reset this unexpected preroll, including silent footage,
+    // so resuming narration does not wait for the clock to catch stale pixels.
+    if (rewindPreroll && video.currentTime > 0) video.currentTime = 0;
+  };
+  const markPlaying = (video: HTMLVideoElement) => {
+    if (video.currentSrc === video.src && video.getAttribute("src") === mediaUrl
+      && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) playableVideoUrl.current = mediaUrl;
+    enforceRequestedPause(video);
+  };
+
+  const mediaStyle: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    objectPosition: resolvedPosition,
+  };
+  return (
+    <>
+      {exhaustedKey === videoPresentationKey && <div
+        role="status" data-media-continuity="exhausted"
+        style={{ position: "absolute", inset: 0, zIndex: 3, background: "#000", color: "#bbb", display: "grid", placeContent: "center", font: "14px system-ui" }}
+      >Visual unavailable</div>}
+      {videoPool ? <IosVideoSurface
+        pool={videoPool}
+        videoRef={videoRef}
+        src={mediaUrl}
+        poster={decodedVideoUrl !== mediaUrl ? mediaPoster || undefined : undefined}
+        muted={resolvedMuted}
+        onLoadedMetadata={fitDuration}
+        onEnded={finishMotion}
+        onPlay={enforceRequestedPause}
+        onPlaying={markPlaying}
+        onWaiting={() => { if (isPlaying) setWaitingKey(videoPresentationKey); }}
+        onError={onError}
+        onUnavailable={() => unavailable()}
+        mediaPosition={mediaPosition}
+        style={{ ...mediaStyle, visibility: exhaustedKey === videoPresentationKey ? "hidden" : undefined }}
+      /> : <video
+        ref={videoRef}
+        src={mediaUrl}
+        poster={decodedVideoUrl !== mediaUrl ? mediaPoster || undefined : undefined}
+        muted={resolvedMuted}
+        loop={false}
+        playsInline
+        preload="auto"
+        onLoadedMetadata={event => fitDuration(event.currentTarget)}
+        onEnded={finishMotion}
+        onPlay={event => enforceRequestedPause(event.currentTarget)}
+        onPlaying={event => markPlaying(event.currentTarget)}
+        onWaiting={() => { if (isPlaying) setWaitingKey(videoPresentationKey); }}
+        onError={onError}
+        data-media-position={mediaPosition}
+        data-video-backdrop="scene"
+        style={{ ...mediaStyle, visibility: exhaustedKey === videoPresentationKey ? "hidden" : undefined }}
+      />}
+    </>
+  );
+};

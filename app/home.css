@@ -1,0 +1,21 @@
+html { color-scheme:dark; background:#05070d; }
+body { margin:0; min-width:320px; }
+.embed-preview { min-height:100svh; background:#edeef2; color:#242633; font:12px/1.5 -apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif; outline:none; }
+.preview-toolbar { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 28px; }
+.preview-toolbar > span { display:flex; align-items:center; gap:12px; }
+.preview-toolbar strong { font-size:11px; font-weight:500; }
+.preview-badge { color:#727582; font-size:10px; }
+.preview-toolbar > div { display:flex; gap:4px; align-items:center; }
+.preview-toolbar button { border:0; background:transparent; padding:7px 12px; color:#646779; font:inherit; font-size:11px; cursor:pointer; border-radius:999px; }
+.preview-toolbar button[aria-pressed=true] { background:#dcdde5; color:#242633; }
+.preview-toolbar a { text-decoration:none; margin-left:12px; font-size:11px; color:#646779; }
+.preview-stage { margin:16px auto 0; width:calc(100% - 48px); transition:max-width .15s ease; }
+.preview-wide { max-width:1180px; }
+.preview-side { max-width:410px; }
+.preview-footnote { text-align:center; margin:0; padding:22px; font-size:10px; color:#727582; }
+.embed-only { padding:0; }
+.embed-only .prompt-output { border:0; border-radius:0; min-height:100svh; }
+.preview-dark { background:#05070d; color:#bfc2cf; }
+.preview-dark .preview-toolbar button, .preview-dark .preview-toolbar a { color:#9297ac; }
+.preview-dark .preview-toolbar button[aria-pressed=true] { color:#f8f8fc; background:#1d2130; }
+@media (max-width:600px) { .preview-toolbar { padding:12px 16px; flex-wrap:wrap; gap:6px; } .preview-toolbar > span { display:none; } .preview-toolbar > div { width:100%; justify-content:center; } .preview-stage { width:100%; margin:0; } .preview-stage .prompt-output { border-radius:0; border-left:0; border-right:0; } .preview-footnote { padding:16px; } }

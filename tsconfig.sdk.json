@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "declaration": true, "emitDeclarationOnly": true, "outDir": "sdk-dist/types", "rootDir": "src" },
+  "include": ["src/briefing/index.ts", "src/briefing/react.ts", "src/briefing/server.ts"],
+  "exclude": ["node_modules", "tests", "app"]
+}

@@ -1,0 +1,78 @@
+import React from "react";
+
+// Source-owned templates may live in a consumer's tree while VideoFrame comes
+// from the package. Both copies must observe the same internal context or the
+// consumer template would mount a second video over the player-owned plane,
+// and would never inherit the player's native media audio state.
+export type ExternalVideoBackdropMode = false | "pending" | "ready" | "fallback";
+
+export type MediaRecoveryReason = "decode-error" | "frame-readiness-timeout" | "stalled-media" | "playback-error" | "duration-mismatch";
+
+interface BackdropContextValue {
+  mode: ExternalVideoBackdropMode;
+  audioMuted: boolean;
+  audioVolume: number;
+  preparingNarration?: boolean;
+  narrationActive?: () => boolean;
+  onMediaError?: (reason?: MediaRecoveryReason) => void;
+}
+
+const DEFAULT: BackdropContextValue = { mode: false, audioMuted: true, audioVolume: 1 };
+
+const sharedContext = globalThis as typeof globalThis & {
+  __briefingsVideoBackdropContext?: React.Context<BackdropContextValue>;
+};
+const BackdropContext = sharedContext.__briefingsVideoBackdropContext
+  ??= React.createContext<BackdropContextValue>(DEFAULT);
+
+export function ExternalVideoBackdropProvider({
+  mode,
+  audioMuted = true,
+  audioVolume = 1,
+  preparingNarration = false,
+  narrationActive,
+  onMediaError,
+  children,
+}: {
+  mode: ExternalVideoBackdropMode;
+  audioMuted?: boolean;
+  audioVolume?: number;
+  preparingNarration?: boolean;
+  narrationActive?: () => boolean;
+  onMediaError?: (reason?: MediaRecoveryReason) => void;
+  children: React.ReactNode;
+}) {
+  const value = React.useMemo(
+    () => ({ mode, audioMuted, audioVolume, preparingNarration, narrationActive, onMediaError }),
+    [mode, audioMuted, audioVolume, preparingNarration, narrationActive, onMediaError],
+  );
+  return (
+    <BackdropContext.Provider value={value}>
+      {children}
+    </BackdropContext.Provider>
+  );
+}
+
+export function useExternalVideoBackdrop(): ExternalVideoBackdropMode {
+  return React.useContext(BackdropContext).mode;
+}
+
+export function useMediaAudio(): { muted: boolean; volume: number } {
+  const { audioMuted, audioVolume } = React.useContext(BackdropContext);
+  return { muted: audioMuted, volume: audioVolume };
+}
+
+/** Internal first-frame priming state; an explicit viewer pause never sets it. */
+export function useNarrationPreroll(): boolean {
+  return React.useContext(BackdropContext).preparingNarration === true;
+}
+
+/** Scene-bound live speech; the player owns its completion and timeout policy. */
+export function useActiveNarration(): (() => boolean) | undefined {
+  return React.useContext(BackdropContext).narrationActive;
+}
+
+/** Routes local decoder/playback failures to the scene-owned recovery surface. */
+export function useMediaFailure(): ((reason?: MediaRecoveryReason) => void) | undefined {
+  return React.useContext(BackdropContext).onMediaError;
+}

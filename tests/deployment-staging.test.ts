@@ -1,0 +1,71 @@
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, test } from "vitest";
+import { createDeploymentStage } from "../scripts/deployment-project-config.mjs";
+
+const roots: string[] = [];
+afterEach(() => roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })));
+function application() {
+  const root = mkdtempSync(join(tmpdir(), "deploy-stage-"));
+  roots.push(root);
+  mkdirSync(join(root, "dist"));
+  mkdirSync(join(root, ".generated/functions-build"), { recursive: true });
+  writeFileSync(join(root, "wrangler.jsonc"), JSON.stringify({ name: "local", compatibility_date: "2026-04-09", vars: { VIDEO_CHAT_FAL_PREVIEW: "enabled", VIDEO_CHAT_FAL_DAILY_CLIP_LIMIT: "200" },
+    r2_buckets: [{ binding: "VIDEO_CHAT_ANSWER_CACHE", bucket_name: "video-chat-answer-cache-local" }] }));
+  writeFileSync(join(root, "dist/index.html"), "verified frontend");
+  writeFileSync(join(root, "dist/_headers"), "/*\n X-Frame-Options: DENY\n");
+  writeFileSync(join(root, ".generated/functions-build/index.js"), "export default {fetch:()=>new Response('verified API')};");
+  const identity = { commit: "a".repeat(40), sourceSha256: "b".repeat(64) };
+  writeFileSync(join(root, "dist/app-build.json"), JSON.stringify(identity));
+  const workerPath = ".generated/functions-build/index.js";
+  writeFileSync(join(root, ".generated/app-artifact.json"), JSON.stringify({ ...identity, files: [{ path: workerPath, sha256: createHash("sha256").update(readFileSync(join(root, workerPath))).digest("hex") }] }));
+  return root;
+}
+const settings = {
+  DEPLOYMENT_TARGET: "preview", CLOUDFLARE_PAGES_PROJECT: "example-project",
+  CLOUDFLARE_QUOTA_DATABASE_ID: "11111111-1111-4111-8111-111111111111", CLOUDFLARE_QUOTA_DATABASE_NAME: "example-preview",
+};
+
+test("staging uses conventional config and exact prebuilt frontend/API without changing tracked config", () => {
+  const root = application();
+  const original = readFileSync(join(root, "wrangler.jsonc"), "utf8");
+  const stage = createDeploymentStage(root, settings);
+  const config = JSON.parse(readFileSync(join(stage, "wrangler.jsonc"), "utf8"));
+  expect(config.pages_build_output_dir).toBe("./dist");
+  expect(config.vars.VIDEO_CHAT_PAID_PROVIDERS).toBe("disabled");
+  expect(config.env.preview.d1_databases[0].database_id).toBe(settings.CLOUDFLARE_QUOTA_DATABASE_ID);
+  expect(readFileSync(join(stage, "dist/index.html"))).toEqual(readFileSync(join(root, "dist/index.html")));
+  expect(readFileSync(join(stage, "dist/_worker.js"))).toEqual(readFileSync(join(root, ".generated/functions-build/index.js")));
+  expect(readFileSync(join(root, "wrangler.jsonc"), "utf8")).toBe(original);
+  writeFileSync(join(stage, "dist/stale.js"), "old output");
+  createDeploymentStage(root, { ...settings, DEPLOYMENT_TARGET: "production" });
+  expect(() => readFileSync(join(stage, "dist/stale.js"))).toThrow();
+  expect(JSON.parse(readFileSync(join(stage, "wrangler.jsonc"), "utf8")).vars.VIDEO_CHAT_PAID_PROVIDERS).toBe("enabled");
+});
+
+test("the answer cache bucket binds only from deployment settings, never the local name", () => {
+  const root = application();
+  const withoutBucket = JSON.parse(readFileSync(join(createDeploymentStage(root, settings), "wrangler.jsonc"), "utf8"));
+  expect(withoutBucket.r2_buckets).toBeUndefined();
+  expect(withoutBucket.env.preview.r2_buckets).toBeUndefined();
+  const staged = JSON.parse(readFileSync(join(createDeploymentStage(root, { ...settings, CLOUDFLARE_ANSWER_CACHE_BUCKET: " example-answers " }), "wrangler.jsonc"), "utf8"));
+  const expected = [{ binding: "VIDEO_CHAT_ANSWER_CACHE", bucket_name: "example-answers" }];
+  expect(staged.r2_buckets).toEqual(expected);
+  expect(staged.env.preview.r2_buckets).toEqual(expected);
+  expect(JSON.stringify(staged)).not.toContain("answer-cache-local");
+});
+
+test("staging refuses a worker that changed after build verification", () => {
+  const root = application();
+  writeFileSync(join(root, ".generated/functions-build/index.js"), "unverified worker");
+  expect(() => createDeploymentStage(root, settings)).toThrow("Compiled worker differs");
+});
+
+test.each(["preview", "production"])("%s deployment disables generated video even when local configuration enables it", target => {
+  const stage = createDeploymentStage(application(), { ...settings, DEPLOYMENT_TARGET: target });
+  const config = JSON.parse(readFileSync(join(stage, "wrangler.jsonc"), "utf8"));
+  expect(config.vars.VIDEO_CHAT_FAL_PREVIEW).toBe("disabled");
+  expect(config.env.preview.vars.VIDEO_CHAT_FAL_PREVIEW).toBe("disabled");
+});

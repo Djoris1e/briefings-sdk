@@ -1,0 +1,114 @@
+{
+  "name": "@djoris/briefings",
+  "version": "0.1.0",
+  "description": "Embeddable React component and provider-neutral server handler that turn supplied customer context and release notes into a streaming video, a two-speaker podcast and an article.",
+  "keywords": [
+    "briefings",
+    "product-updates",
+    "react",
+    "sdk",
+    "streaming-video",
+    "podcast",
+    "llm"
+  ],
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "build:functions": "wrangler pages functions build functions --outdir .generated/functions-build --project-directory . --build-output-directory dist",
+    "verify:app-build": "node scripts/verify-app-build.mjs",
+    "preview": "vite preview --host 127.0.0.1",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:api": "tsx --test tests/app-api/*.test.mjs",
+    "browser:install": "playwright install chromium firefox webkit",
+    "browser:test": "playwright test",
+    "test:app": "playwright test --config app.playwright.config.ts",
+    "acceptance:chat": "tsx scripts/acceptance/run.ts",
+    "verify": "npm run check && npm run check:docs && npm run build && npm run build:functions && npm run verify:app-build && npm run verify:preview && npm run test:app",
+    "verify:preview": "node scripts/verify-app-preview.mjs",
+    "check:unused": "knip",
+    "check": "npm run lint && npm run typecheck && npm run check:examples && npm run check:unused && npm test && npm run test:api",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:quick": "npm run lint && npm run typecheck",
+    "test:engine": "vitest run tests/hybrid-planner.test.ts tests/hybrid-duration-budget.test.ts tests/editorial-visuals.test.tsx",
+    "test:formats": "vitest run tests/prompt-output.test.tsx tests/briefing-component.test.tsx tests/briefing.test.ts tests/briefing-handler.test.ts && tsx --test tests/app-api/briefing.test.mjs tests/app-api/format-output.test.mjs",
+    "test:embed": "playwright test tests/app-browser/format-output.spec.ts tests/app-browser/hybrid-playback.spec.ts --config app.playwright.config.ts --project chromium",
+    "build:sdk": "node scripts/build-sdk.mjs",
+    "prepack": "npm run build:sdk",
+    "check:examples": "tsc -p tsconfig.examples.json --noEmit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@playwright/test": "1.62.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "5.0.4",
+    "esbuild": "0.28.2",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "jsdom": "^26.1.0",
+    "knip": "6.35.0",
+    "miniflare": "5.20260820.0-alpha",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vite": "7.3.6",
+    "vitest": "^3.2.4",
+    "wrangler": "4.125.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "overrides": {
+    "esbuild": "0.28.2",
+    "miniflare": {
+      "sharp": "0.35.4"
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "npm@11.17.0",
+  "private": true,
+  "dependencies": {
+    "jose": "6.2.12"
+  },
+  "files": [
+    "sdk-dist",
+    "README.md",
+    "docs/SDK.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./sdk-dist/types/briefing/index.d.ts",
+      "import": "./sdk-dist/index.js"
+    },
+    "./react": {
+      "types": "./sdk-dist/types/briefing/react.d.ts",
+      "import": "./sdk-dist/react.js"
+    },
+    "./server": {
+      "types": "./sdk-dist/types/briefing/server.d.ts",
+      "import": "./sdk-dist/server.js"
+    },
+    "./styles.css": "./sdk-dist/react.css",
+    "./audio-library/*": "./sdk-dist/audio-library/*"
+  },
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Djoris1e/briefings-sdk.git"
+  }
+}

@@ -1,0 +1,637 @@
+import { requestSpeech } from "./speech-request.js";
+import { primeSoundtrackGesture } from "../player/soundtrack-gesture.js";
+import { getIosAudioContext, isIosAudioOutput, resumeIosAudioContext } from "../player/ios-audio-output.js";
+import { audioVolume, rampMediaVolume } from "../player/audio-volume.js";
+import type { NarrationVoice } from "../player/use-narration.js";
+import { withDeadline } from "./deadline.js";
+import { estimateNarrationSeconds } from "../protocol/clip-budget.js";
+import { parseSpeechWordTimings, type SpeechWordTiming } from "../protocol/speech-timing.js";
+
+const DEFAULT_MAX_CACHED_LINES = 60;
+// Leave room for the server's ten-second synthesis and timestamp-alignment
+// budget, plus network transfer and browser decoding.
+const SPEECH_PREPARATION_TIMEOUT_MS = 12_000;
+const FALLBACK_BITS_PER_SECOND = 128_000;
+const MAX_AUDIO_BYTES = 1024 * 1024;
+const MAX_DECODED_CACHE_BYTES = 32 * 1024 * 1024;
+// 25ms of silent PCM, played unmuted to retain Safari permission on this sink.
+const ACTIVATION_AUDIO = "data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YZABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+let sharedContext: AudioContext | undefined;
+
+type PreparedLine =
+  | ({ source: "generated"; seconds: number; measured?: boolean; wordTimings?: SpeechWordTiming[] }
+    & ({ src: string; buffer?: never } | { buffer: AudioBuffer; src?: never }))
+  | { source: "unavailable"; seconds: number };
+
+export interface VideoChatPreparedSpeech {
+  /** Measured or conservatively estimated spoken duration, in seconds. */
+  seconds: number;
+  /** True only for decoded audio with seek support, never duration estimates. */
+  supportsOffsets?: boolean;
+  /** Validated words aligned to this exact prepared audio. */
+  wordTimings?: SpeechWordTiming[];
+}
+
+export interface VideoChatVoice extends NarrationVoice {
+  prepare(text: string, options?: { signal?: AbortSignal }): Promise<VideoChatPreparedSpeech>;
+  pause(): void;
+  resume(): void;
+  setMuted(muted: boolean): void;
+  /** Change loudness without changing timing. */
+  setVolume?(volume: number): void;
+  /** Playback speed, bounded to 0.5–2. Source-time offsets remain unchanged. */
+  setPlaybackRate?(rate: number): void;
+  /** Actual post-gain signal RMS, 0–1; zero when idle, paused or unavailable. */
+  getAudioLevel?(): number;
+  /** Explicit new-generation boundary only; does not fetch or clear successful audio. */
+  clearFailedPreparations?(): void;
+  dispose?(): void;
+}
+
+export interface CreateVideoChatVoiceOptions {
+  /** Server maps these stable roles to configured voices; arbitrary voice IDs stay server-side. */
+  speaker?: "host" | "analyst";
+  endpoint?: string | URL;
+  headers?: HeadersInit;
+  credentials?: RequestCredentials;
+  fetcher?: typeof fetch;
+  maxCachedLines?: number;
+  /** Opt in to a real signal meter; native speech then uses a Web Audio graph. */
+  enableAudioLevel?: boolean;
+  /** Called when generated speech is unavailable and playback continues silently. */
+  onFallback?: () => unknown;
+}
+
+function actionEndpoint(endpoint: string | URL, action: string): string {
+  const value = String(endpoint);
+  return `${value}${value.includes("?") ? "&" : "?"}action=${encodeURIComponent(action)}`;
+}
+
+function estimatedSpeechSeconds(text: string): number {
+  return Math.max(1, estimateNarrationSeconds(text));
+}
+
+async function measureSeconds(bytes: ArrayBuffer): Promise<{ seconds: number; measured: boolean }> {
+  try {
+    sharedContext ??= new AudioContext();
+    const decoded = await sharedContext.decodeAudioData(bytes.slice(0));
+    if (decoded.duration > 0) return { seconds: decoded.duration, measured: true };
+  } catch {
+    // Browsers may keep audio decoding locked until the first user gesture.
+  }
+  return { seconds: (bytes.byteLength * 8) / FALLBACK_BITS_PER_SECOND, measured: false };
+}
+
+/**
+ * Create the generated-speech client with silent recovery.
+ *
+ * The endpoint is provider-neutral. A no-content response (or a compatible
+ * endpoint's 404) disables narration for the rest of the session.
+ */
+export function createVideoChatVoice(options: CreateVideoChatVoiceOptions = {}): VideoChatVoice {
+  const endpoint = options.endpoint ?? "/api/video-chat";
+  const fetcher = options.fetcher ?? fetch;
+  const maximum = options.maxCachedLines ?? DEFAULT_MAX_CACHED_LINES;
+  const bufferOutput = isIosAudioOutput();
+  if (!Number.isInteger(maximum) || maximum <= 0) throw new Error("maxCachedLines must be a positive integer");
+
+  const lines = new Map<string, PreparedLine>();
+  const pendingLoads = new Set<AbortController>();
+  let sounding: HTMLAudioElement | undefined;
+  // Safari's playback permission belongs to the media element. Keep the sink
+  // that played the opening when later lines arrive after user activation expires.
+  let generatedElement: HTMLAudioElement | undefined;
+  let stopGenerated: (() => void) | undefined;
+  let held = false;
+  let silent = false;
+  let volume = 1;
+  let playbackRate = 1;
+  let activeSpeech = false;
+  type Meter = { analyser: AnalyserNode; samples: Float32Array<ArrayBuffer> };
+  const connectGain = (context: AudioContext, gain: GainNode): Meter | undefined => {
+    if (options.enableAudioLevel) {
+      let analyser: AnalyserNode | undefined;
+      try {
+        analyser = context.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0;
+        gain.connect(analyser); analyser.connect(context.destination);
+        return { analyser, samples: new Float32Array(analyser.fftSize) };
+      } catch {
+        gain.disconnect(); analyser?.disconnect();
+        // A missing analyser must never prevent ordinary narration playback.
+      }
+    }
+    gain.connect(context.destination);
+  };
+  let buffered: {
+    context: AudioContext; gain: GainNode;
+    meter?: Meter; setRate: (rate: number) => void;
+    time: () => number; pause: () => void; resume: () => void; fail: () => void;
+  } | undefined;
+  let outputContext: AudioContext | undefined;
+  let nativeVolumeSupported: boolean | undefined;
+  let output: { source: MediaElementAudioSourceNode; gain: GainNode; meter?: Meter } | undefined;
+  let cancelVolumeRamp: (() => void) | undefined;
+  const applyVolume = (immediate = false) => {
+    cancelVolumeRamp?.();
+    cancelVolumeRamp = undefined;
+    if (buffered) {
+      const { context, gain } = buffered;
+      gain.gain.cancelScheduledValues(context.currentTime);
+      if (immediate || silent) gain.gain.setValueAtTime(silent ? 0 : volume, context.currentTime);
+      else gain.gain.setTargetAtTime(volume, context.currentTime, .035);
+    }
+    if (generatedElement) {
+      generatedElement.muted = silent || volume === 0;
+      if (output && outputContext) {
+        output.gain.gain.cancelScheduledValues(outputContext.currentTime);
+        if (immediate) output.gain.gain.setValueAtTime(volume, outputContext.currentTime);
+        else output.gain.gain.setTargetAtTime(volume, outputContext.currentTime, .035);
+      } else if (immediate) {
+        try { generatedElement.volume = volume; } catch { /* Native volume may be fixed on iOS. */ }
+      } else cancelVolumeRamp = rampMediaVolume(generatedElement, volume);
+    }
+  };
+  const connectOutput = () => {
+    // Only generated blob/data sources enter this graph, after a real gesture
+    // unlocks it. Remote videos keep their native, CORS-safe audio path.
+    if (output || !generatedElement || outputContext?.state !== "running") return;
+    if (nativeVolumeSupported === undefined) {
+      const previous = generatedElement.volume;
+      const probe = previous === .5 ? .25 : .5;
+      try {
+        generatedElement.volume = probe;
+        nativeVolumeSupported = generatedElement.volume === probe;
+      } catch { nativeVolumeSupported = false; }
+      finally {
+        try { generatedElement.volume = previous; } catch { /* Fixed native gain uses the graph below. */ }
+      }
+    }
+    if (nativeVolumeSupported && !options.enableAudioLevel) {
+      // WebKit can buffer this source ahead of its audible output when routed
+      // through Web Audio, distorting currentTime and ended. Keep narration's
+      // native clock intact whenever its native gain already works.
+      void outputContext.close().catch(() => undefined);
+      outputContext = undefined;
+      return;
+    }
+    try {
+      const source = outputContext.createMediaElementSource(generatedElement);
+      const gain = outputContext.createGain();
+      source.connect(gain);
+      const meter = connectGain(outputContext, gain);
+      generatedElement.volume = 1;
+      output = { source, gain, meter };
+      applyVolume(true);
+    } catch { /* Keep direct speech playback when Web Audio is unavailable. */ }
+  };
+  let disposed = false;
+  let generatedSpeechUnavailable = false;
+  let playbackFailure: (() => void) | undefined;
+  // Native play promises can reject after pause/resume has superseded them.
+  // Only the latest request may fail the current line or release its blob.
+  let playbackAttempt = 0;
+  // A browser that refuses playback outside a user gesture (NotAllowedError)
+  // has not lost the speech: the line stays cached so a later gesture or an
+  // explicit retry can play it, instead of being recorded as unavailable.
+  let autoplayBlocked = false;
+  const playGenerated = (element: HTMLAudioElement, fail: (() => void) | undefined) => {
+    const attempt = ++playbackAttempt;
+    const reject = (cause?: unknown) => {
+      if (attempt !== playbackAttempt || held || sounding !== element) return;
+      autoplayBlocked = cause instanceof DOMException && cause.name === "NotAllowedError";
+      fail?.();
+    };
+    try { void element.play().catch(reject); }
+    catch (cause) { reject(cause); }
+  };
+  const notifyFallback = () => {
+    try { void Promise.resolve(options.onFallback?.()).catch(() => undefined); }
+    catch { /* Observer failures do not affect speech. */ }
+  };
+
+  const forgetOldest = () => {
+    const decodedBytes = () => [...lines.values()].reduce((total, line) => total + (line.source === "generated" && line.buffer
+      ? line.buffer.length * line.buffer.numberOfChannels * Float32Array.BYTES_PER_ELEMENT : 0), 0);
+    // A single larger current line may remain cached; queued PCM cannot grow
+    // to sixty compressed-response equivalents on memory-constrained phones.
+    while (lines.size > maximum || (lines.size > 1 && decodedBytes() > MAX_DECODED_CACHE_BYTES)) {
+      const oldest = lines.keys().next();
+      if (oldest.done) return;
+      const line = lines.get(oldest.value);
+      lines.delete(oldest.value);
+      if (line?.source === "generated" && line.src) URL.revokeObjectURL(line.src);
+    }
+  };
+
+  const load = async (text: string, signal?: AbortSignal): Promise<PreparedLine> => {
+    if (disposed) throw new DOMException("Video chat voice was disposed", "AbortError");
+    const normalized = text.trim();
+    const cached = lines.get(normalized);
+    if (cached) {
+      lines.delete(normalized);
+      lines.set(normalized, cached);
+      return cached;
+    }
+
+    const headers = new Headers(options.headers);
+    headers.set("content-type", "application/json");
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forwardAbort();
+    else signal?.addEventListener("abort", forwardAbort, { once: true });
+    pendingLoads.add(controller);
+    let prepared: PreparedLine;
+    let createdSrc: string | undefined;
+    try {
+      try {
+        if (generatedSpeechUnavailable) {
+          prepared = { source: "unavailable", seconds: estimatedSpeechSeconds(normalized) };
+        } else {
+          prepared = await withDeadline(async (preparationSignal): Promise<PreparedLine> => {
+            const response = await requestSpeech(fetcher, actionEndpoint(endpoint, "speech"), {
+              method: "POST",
+              headers,
+              credentials: options.credentials,
+              signal: preparationSignal,
+              body: JSON.stringify({ text: normalized, ...(options.speaker ? { speaker: options.speaker } : {}) }),
+            });
+            preparationSignal.throwIfAborted();
+            if (response.status === 204 || response.status === 404) {
+              generatedSpeechUnavailable = true;
+              return { source: "unavailable", seconds: estimatedSpeechSeconds(normalized) };
+            }
+            if (!response.ok) throw new Error("Speech is unavailable");
+            let bytes: ArrayBuffer;
+            let wordTimings: SpeechWordTiming[] | undefined;
+            let mediaType = response.headers.get("content-type") || "audio/mpeg";
+            if (mediaType.split(";")[0]?.trim().toLowerCase() === "application/json") {
+              const body = await response.arrayBuffer();
+              preparationSignal.throwIfAborted();
+              if (body.byteLength > 2 * MAX_AUDIO_BYTES) throw new Error("Speech response is too large");
+              const value: unknown = JSON.parse(new TextDecoder().decode(body));
+              if (!value || typeof value !== "object" || !("audio" in value) || typeof value.audio !== "string"
+                || value.audio.length === 0 || value.audio.length > Math.ceil(MAX_AUDIO_BYTES / 3) * 4
+                || !("mediaType" in value) || value.mediaType !== "audio/mpeg") throw new Error("Invalid speech audio");
+              const binary = atob(value.audio);
+              if (!binary.length || binary.length > MAX_AUDIO_BYTES) throw new Error("Invalid speech audio");
+              bytes = Uint8Array.from(binary, character => character.charCodeAt(0)).buffer;
+              mediaType = value.mediaType;
+              if ("wordTimings" in value) wordTimings = parseSpeechWordTimings(value.wordTimings, normalized);
+            } else {
+              bytes = await response.arrayBuffer();
+            }
+            preparationSignal.throwIfAborted();
+            if (!bytes.byteLength || bytes.byteLength > MAX_AUDIO_BYTES) throw new Error("Speech response is too large");
+            if (bufferOutput) {
+              const context = getIosAudioContext();
+              if (!context) throw new Error("Speech audio output is unavailable");
+              const buffer = await context.decodeAudioData(bytes.slice(0));
+              preparationSignal.throwIfAborted();
+              if (!Number.isFinite(buffer.duration) || buffer.duration <= 0) throw new Error("Invalid speech duration");
+              if (wordTimings) wordTimings = parseSpeechWordTimings(wordTimings, normalized, buffer.duration);
+              return { source: "generated", buffer, seconds: buffer.duration, measured: true, ...(wordTimings ? { wordTimings } : {}) };
+            }
+            const seconds = await measureSeconds(bytes);
+            if (wordTimings && seconds.measured) wordTimings = parseSpeechWordTimings(wordTimings, normalized, seconds.seconds);
+            preparationSignal.throwIfAborted();
+            // Allocate only after every asynchronous step succeeds. A late decode
+            // cannot leak an object URL or replace the cached unavailable result.
+            createdSrc = URL.createObjectURL(new Blob([bytes], {
+              type: mediaType,
+            }));
+            return { source: "generated", src: createdSrc, ...seconds, ...(wordTimings ? {wordTimings} : {}) };
+          }, SPEECH_PREPARATION_TIMEOUT_MS, controller.signal);
+        }
+      } catch (cause) {
+        if (createdSrc) URL.revokeObjectURL(createdSrc);
+        if (controller.signal.aborted) throw controller.signal.reason ?? cause;
+        notifyFallback();
+        prepared = { source: "unavailable", seconds: estimatedSpeechSeconds(normalized) };
+      }
+
+      if (disposed || controller.signal.aborted) {
+        if (prepared.source === "generated" && prepared.src) URL.revokeObjectURL(prepared.src);
+        throw controller.signal.reason ?? new DOMException("Video chat voice was disposed", "AbortError");
+      }
+      const existing = lines.get(normalized);
+      if (existing) {
+        if (prepared.source === "generated" && prepared.src) URL.revokeObjectURL(prepared.src);
+        lines.delete(normalized);
+        lines.set(normalized, existing);
+        return existing;
+      }
+      lines.set(normalized, prepared);
+      forgetOldest();
+      return prepared;
+    } finally {
+      pendingLoads.delete(controller);
+      signal?.removeEventListener("abort", forwardAbort);
+    }
+  };
+
+  const speechStops = new Set<() => void>();
+  const watchSpeech = (seconds: number, expire: () => void) => {
+    // Count only active playback time; a deliberate pause must remain paused.
+    let remaining = Math.max(1, seconds) * 2_000 + 5_000;
+    const timer = setInterval(() => {
+      if (held) return;
+      remaining -= 250;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        expire();
+      }
+    }, 250);
+    return () => clearInterval(timer);
+  };
+
+  const speakBuffer = (buffer: AudioBuffer, text: string, signal: AbortSignal, initialTime: number, notifyStart: () => void) => new Promise<void>((resolve, reject) => {
+    const context = getIosAudioContext();
+    if (!context) { reject(new Error("Speech audio output is unavailable")); return; }
+    const gain = context.createGain();
+    const meter = connectGain(context, gain);
+    let source: AudioBufferSourceNode | undefined;
+    let offset = initialTime;
+    let since = context.currentTime;
+    let rate = playbackRate;
+    let generation = 0;
+    let finished = false;
+    const time = () => Math.min(buffer.duration, offset + (source ? Math.max(0, context.currentTime - since) * rate : 0));
+    const stopSource = () => {
+      generation++;
+      const previous = source;
+      source = undefined;
+      if (!previous) return;
+      previous.onended = null;
+      try { previous.stop(); } catch { /* Already ended or never started. */ }
+      previous.disconnect();
+    };
+    const finish = (failed = false) => {
+      if (finished) return;
+      finished = true;
+      stopSource();
+      gain.disconnect();
+      meter?.analyser.disconnect();
+      clearWatchdog();
+      clearInterval(onsetTimer);
+      signal.removeEventListener("abort", stop);
+      speechStops.delete(stop);
+      if (stopGenerated === stop) stopGenerated = undefined;
+      if (buffered === playback) { buffered = undefined; activeSpeech = false; }
+      if (failed) reject(new Error("Generated speech playback failed"));
+      else resolve();
+    };
+    const stop = () => finish();
+    const fail = () => finish(true);
+    const resume = () => {
+      if (finished || disposed || signal.aborted || held || source) return;
+      const attempt = ++generation;
+      const start = () => {
+        if (finished || attempt !== generation || disposed || signal.aborted || held || source) return;
+        if (context.state !== "running") { fail(); return; }
+        try {
+          const node = context.createBufferSource();
+          source = node;
+          node.buffer = buffer;
+          node.playbackRate.value = rate;
+          node.connect(gain);
+          node.onended = () => { if (source === node && attempt === generation && !held) finish(); };
+          since = context.currentTime;
+          node.start(0, offset);
+        } catch { fail(); }
+      };
+      if (context.state === "running") start();
+      else void resumeIosAudioContext().then(start, () => { if (attempt === generation && !held) fail(); });
+    };
+    const playback = { context, gain, meter, time, resume, fail,
+      setRate: (next: number) => { offset = time(); since = context.currentTime; rate = next; if (source) source.playbackRate.value = next; },
+      pause: () => { offset = time(); stopSource(); } };
+    buffered = playback;
+    stopGenerated = stop;
+    applyVolume(true);
+    const clearWatchdog = watchSpeech(Math.max(buffer.duration, estimatedSpeechSeconds(text)), fail);
+    const onsetTimer = setInterval(() => {
+      if (!finished && !held && source && context.state === "running" && time() >= initialTime + .04) notifyStart();
+    }, 16);
+    speechStops.add(stop);
+    signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
+    else resume();
+  });
+
+  return {
+    clearFailedPreparations() {
+      for (const [text, line] of lines) {
+        if (line.source === "unavailable") lines.delete(text);
+      }
+      // A configured 204/404 stays disabled for this voice instance. Transient
+      // failures may be requested again only after this explicit boundary.
+    },
+    supportsOffsets: true,
+    getCurrentTime: () => buffered?.time() ?? sounding?.currentTime,
+    async prepare(text, preparation = {}) {
+      const line = await load(text, preparation.signal);
+      return { seconds: line.seconds, ...(line.source === "generated" && line.measured === true ? { supportsOffsets: true } : {}),
+        ...(line.source === "generated" && line.wordTimings ? {wordTimings:line.wordTimings} : {}) };
+    },
+    pause() {
+      playbackAttempt++;
+      held = true;
+      buffered?.pause();
+      sounding?.pause();
+    },
+    resume() {
+      held = false;
+      if (!disposed && bufferOutput) {
+        // Resume synchronously from Ask/replay gestures. Voice pause/dispose
+        // never suspends or closes the context shared with music.
+        const playback = buffered;
+        const attempt = ++playbackAttempt;
+        const current = () => attempt === playbackAttempt && buffered === playback && !held && !disposed;
+        void resumeIosAudioContext().then(
+          context => { if (current()) { if (context) playback?.resume(); else playback?.fail(); } },
+          () => { if (current()) playback?.fail(); },
+        );
+      } else if (!disposed) primeSoundtrackGesture();
+      if (!bufferOutput && !disposed && (nativeVolumeSupported !== true || options.enableAudioLevel) && globalThis.navigator?.userActivation?.isActive) {
+        try {
+          const Context = globalThis.AudioContext ?? (globalThis as typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+          if (Context) {
+            outputContext ??= new Context();
+            void outputContext.resume().then(connectOutput).catch(() => undefined);
+          }
+        } catch { /* The native sink remains the fallback. */ }
+      }
+      // Ask/replay/resume already enter here synchronously from their gesture.
+      // Prime only a fresh sink; never replace current speech or prime on timers.
+      if (!bufferOutput && !disposed && !silent && !generatedElement && globalThis.navigator?.userActivation?.isActive) {
+        const element = generatedElement = new Audio();
+        element.src = ACTIVATION_AUDIO;
+        applyVolume(true);
+        connectOutput();
+        try { void element.play().catch(() => undefined); }
+        catch { /* Actual generated speech can still use the prepared sink. */ }
+      }
+      if (sounding) playGenerated(sounding, playbackFailure);
+    },
+    setMuted(muted) {
+      silent = muted;
+      applyVolume();
+    },
+    setVolume(next) {
+      volume = audioVolume(next);
+      applyVolume(!activeSpeech);
+    },
+    setPlaybackRate(next) {
+      if (!Number.isFinite(next) || disposed) return;
+      playbackRate = Math.min(2, Math.max(.5, next));
+      buffered?.setRate(playbackRate);
+      if (generatedElement) {
+        generatedElement.preservesPitch = true;
+        generatedElement.playbackRate = playbackRate;
+      }
+    },
+    getAudioLevel() {
+      if (disposed || held || silent || volume === 0 || !activeSpeech || sounding?.paused === true) return 0;
+      const meter = buffered?.meter ?? output?.meter;
+      const context = buffered?.context ?? outputContext;
+      if (!meter || context?.state !== "running") return 0;
+      try {
+        meter.analyser.getFloatTimeDomainData(meter.samples);
+        const rms = Math.sqrt(meter.samples.reduce((sum, value) => sum + value * value, 0) / meter.samples.length);
+        return Number.isFinite(rms) ? Math.min(1, rms) : 0;
+      } catch { return 0; }
+    },
+    async speak(text, { signal, onStart, offsetSeconds, onPlaybackSource }): Promise<void> {
+      let started = false;
+      const notifyStart = (source?: "browser" | "generated") => {
+        if (started || disposed || signal.aborted || silent || held) return;
+        started = true;
+        activeSpeech = true;
+        if (source) {
+          try { void Promise.resolve(onPlaybackSource?.(source)).catch(() => undefined); }
+          catch { /* Source observers do not affect playback. */ }
+        }
+        try { void Promise.resolve(onStart?.(source)).catch(() => undefined); }
+        catch { /* Observer failures do not affect playback. */ }
+      };
+      const line = await load(text, signal);
+      if (disposed || signal.aborted || silent) return;
+      if (offsetSeconds !== undefined && (line.source !== "generated" || !line.measured || !Number.isFinite(offsetSeconds) || offsetSeconds < 0 || offsetSeconds >= line.seconds)) throw new Error("Narration group requires measured, seekable audio");
+      if (line.source === "unavailable") return;
+
+      let playbackFailed = false;
+      try {
+        stopGenerated?.();
+        if (line.buffer) {
+          await speakBuffer(line.buffer, text, signal, offsetSeconds ?? 0, () => notifyStart("generated"));
+        } else {
+          const element = generatedElement ??= new Audio();
+          const selectedSrc = line.src;
+          element.src = selectedSrc;
+          element.preservesPitch = true;
+          element.playbackRate = playbackRate;
+          applyVolume(true);
+          connectOutput();
+          element.currentTime = offsetSeconds ?? 0;
+          sounding = element;
+          await new Promise<void>((resolve) => {
+            let finished = false;
+            let onsetTimer: ReturnType<typeof setTimeout> | undefined;
+            const initialTime = offsetSeconds ?? 0;
+            const finish = () => {
+              if (finished) return;
+              finished = true;
+              clearWatchdog();
+              clearTimeout(onsetTimer);
+              signal.removeEventListener("abort", stop);
+              speechStops.delete(stop);
+              element.onplaying = null;
+              element.onended = null;
+              element.onerror = null;
+              if (stopGenerated === stop) stopGenerated = undefined;
+              if (sounding === element) {
+                sounding = undefined;
+                activeSpeech = false;
+                playbackFailure = undefined;
+              }
+              resolve();
+            };
+            const stop = () => {
+              if (finished) return;
+              element.pause();
+              finish();
+            };
+            const fail = () => { if (!finished) { playbackFailed = true; stop(); } };
+            stopGenerated = stop;
+            const clearWatchdog = watchSpeech(Math.max(line.seconds, estimatedSpeechSeconds(text)), fail);
+            speechStops.add(stop);
+            playbackFailure = fail;
+            // A native playing event may precede a working audio sink. Wait for
+            // the actual media clock to advance beyond its seek position; a tiny
+            // decoder priming increment alone is not audible onset evidence.
+            const observeClock = () => {
+              clearTimeout(onsetTimer);
+              if (finished || started) return;
+              if (!held && element.currentTime >= initialTime + 0.04) notifyStart("generated");
+              if (!started) onsetTimer = setTimeout(observeClock, 16);
+            };
+            element.onplaying = observeClock;
+            // A reused media element can deliver the previous resource's queued
+            // ended event after its src has already changed. Only completion of
+            // the currently selected resource may release this speech promise.
+            element.onended = () => {
+              if (element.currentSrc && element.currentSrc !== selectedSrc) return;
+              if ("ended" in element && !element.ended) return;
+              finish();
+            };
+            element.onerror = fail;
+            signal.addEventListener("abort", stop, { once: true });
+            if (!held) playGenerated(element, fail);
+          });
+        }
+      } catch {
+        playbackFailed = true;
+      }
+      if (playbackFailed && offsetSeconds !== undefined) throw new Error("Grouped narration playback failed");
+      if (playbackFailed && !disposed && !signal.aborted && !silent) {
+        notifyFallback();
+        if (autoplayBlocked) { autoplayBlocked = false; return; }
+        if (line.src) URL.revokeObjectURL(line.src);
+        lines.set(text.trim(), { source: "unavailable", seconds: estimatedSpeechSeconds(text) });
+        return;
+      }
+    },
+    dispose() {
+      disposed = true;
+      activeSpeech = false;
+      cancelVolumeRamp?.();
+      output?.source.disconnect();
+      output?.gain.disconnect();
+      output?.meter?.analyser.disconnect();
+      if (typeof outputContext?.close === "function") void outputContext.close().catch(() => undefined);
+      output = undefined;
+      outputContext = undefined;
+      for (const controller of pendingLoads) {
+        controller.abort(new DOMException("Video chat voice was disposed", "AbortError"));
+      }
+      pendingLoads.clear();
+      for (const stop of speechStops) stop();
+      speechStops.clear();
+      sounding?.pause();
+      sounding = undefined;
+      // Release the decoder only when the voice is disposed, not between lines.
+      generatedElement?.pause();
+      generatedElement?.removeAttribute?.("src");
+      generatedElement?.load?.();
+      generatedElement = undefined;
+      stopGenerated = undefined;
+      for (const line of lines.values()) {
+        if (line.source === "generated" && line.src) URL.revokeObjectURL(line.src);
+      }
+      lines.clear();
+    },
+  };
+}

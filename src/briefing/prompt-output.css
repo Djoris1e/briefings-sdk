@@ -1,0 +1,127 @@
+/* The SDK's media canvas, SF typography and glass controls, scoped for hosts. */
+.prompt-output {
+  --po-ink:#f8f8fc; --po-muted:#bfc2cf; --po-border:rgb(255 255 255 / 15%);
+  --po-accent:#c1c4e5; --po-surface:#080b16; --po-soft:rgb(255 255 255 / 6%);
+  --po-radius:24px; --po-space:clamp(22px,4cqw,56px);
+  position:relative; isolation:isolate; container-type:inline-size; box-sizing:border-box;
+  width:100%; min-width:0; min-height:680px; overflow:hidden; border:1px solid var(--po-border);
+  border-radius:var(--po-radius); background:var(--po-surface); color:var(--po-ink); color-scheme:dark;
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Helvetica,Arial,sans-serif;
+  letter-spacing:-.016em;
+}
+.prompt-output[data-theme=light] { --po-ink:#1d1d1f; --po-muted:#6e6e73; --po-border:#d2d2d7; --po-accent:#515154; --po-surface:#fff; --po-soft:#f5f5f7; color-scheme:light; }
+.prompt-output[data-density=compact] { --po-space:22px; }
+.prompt-output *, .prompt-output *::before, .prompt-output *::after { box-sizing:border-box; }
+.prompt-output button, .prompt-output textarea { font:inherit; }
+.prompt-output button { cursor:pointer; transition:background 150ms ease,border-color 150ms ease; }
+.prompt-output button:disabled { opacity:.4; cursor:not-allowed; }
+.prompt-output :is(button,textarea,summary,a):focus-visible { outline:2px solid var(--po-accent); outline-offset:4px; }
+.prompt-output [hidden] { display:none!important; }
+.po-chrome { position:relative; z-index:2; display:flex; justify-content:flex-end; align-items:center; padding:18px var(--po-space); }
+.po-composer { position:relative; margin:0; padding:30px var(--po-space) 32px; }
+.po-welcome { margin-bottom:48px; }
+.po-eyebrow { margin:0 0 16px; color:var(--po-muted); font-size:11px; font-weight:550; letter-spacing:.1em; text-transform:uppercase; }
+.po-welcome h1 { margin:0 0 24px; font-size:clamp(44px,7cqw,78px); line-height:1.06; letter-spacing:-.06em; font-weight:550; }
+.po-welcome h1 em { color:var(--po-accent); font-style:normal; }
+.po-welcome > p:last-child { margin:0; color:var(--po-muted); font-size:17px; line-height:1.55; letter-spacing:-.025em; }
+.po-example-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+.po-example-grid button { position:relative; text-align:left; padding:20px; border:1px solid var(--po-border); border-radius:16px; background:var(--po-soft); color:var(--po-ink); box-shadow:inset 0 1px 0 rgb(255 255 255 / 4%); }
+.po-example-grid button:hover { background:color-mix(in srgb,var(--po-accent) 12%,var(--po-surface)); border-color:var(--po-accent); }
+.po-example-index { display:flex; justify-content:space-between; margin-bottom:22px; color:var(--po-muted); font-size:11px; }
+.po-example-index span { font-size:18px; line-height:1; }
+.po-example-grid strong { display:block; margin-bottom:8px; font-size:16px; line-height:1.3; letter-spacing:-.03em; font-weight:550; }
+.po-example-grid button > span:last-child { display:block; font-size:12px; color:var(--po-muted); line-height:1.5; }
+.po-example-note { margin:12px 0 28px; font-size:10px; color:var(--po-muted); }
+.po-input-card { max-width:760px; margin:0 auto; padding:18px 20px 12px; border:1px solid var(--po-border); border-radius:24px; background:color-mix(in srgb,var(--po-surface) 92%,var(--po-accent)); box-shadow:0 16px 48px rgb(0 0 0 / 12%),inset 0 1px 0 rgb(255 255 255 / 5%); }
+.po-input-card:focus-within { border-color:var(--po-accent); }
+.po-label { display:block; margin-bottom:8px; font-size:12px; color:var(--po-muted); }
+.po-composer textarea { display:block; width:100%; min-height:54px; max-height:240px; resize:vertical; border:0; background:transparent; padding:0; color:var(--po-ink); font-size:16px; line-height:1.6; scrollbar-width:thin; }
+.po-composer textarea:focus-visible { outline:none; }
+.po-composer textarea::placeholder { color:var(--po-muted); }
+.po-composer-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px; }
+.po-character-count { font-size:10px; color:var(--po-muted); font-variant-numeric:tabular-nums; }
+.po-create { min-height:44px; display:flex; align-items:center; gap:18px; border:1px solid var(--po-border); border-radius:999px; background:color-mix(in srgb,var(--po-accent) 22%,var(--po-surface)); color:var(--po-ink); padding:10px 16px; white-space:nowrap; font-size:12px!important; }
+.po-create span { font-size:20px; line-height:1; }
+.po-create:hover:not(:disabled) { background:color-mix(in srgb,var(--po-accent) 35%,var(--po-surface)); }
+.po-sources { font-size:11px; color:var(--po-muted); margin:12px 0; }
+.po-sources summary { cursor:pointer; }
+.po-sources a { color:var(--po-accent); }
+.po-empty { padding:100px var(--po-space); color:var(--po-muted); text-align:center; }
+.po-result { min-height:580px; }
+.po-result-tabs { display:flex; justify-content:center; gap:8px; margin:14px auto 0; }
+.po-result-tabs button { min-height:44px; padding:0 20px; border:1px solid var(--po-border); border-radius:999px; color:var(--po-muted); background:transparent; font-size:12px; }
+.po-result-tabs button[aria-selected=true] { color:var(--po-surface); background:var(--po-ink); }
+.po-video-result { position:relative; }
+.po-video { position:relative; width:100%; max-width:1120px; min-width:min(100%,320px); margin:0 auto; background:#000; }
+.po-caption { position:absolute; pointer-events:none; bottom:5%; left:10%; right:10%; margin:0; color:white; text-align:center; text-shadow:0 2px 8px #000; }
+.po-caption .word-captions { margin:0; font-size:clamp(16px,2cqw,25px); font-weight:500; line-height:1.4; letter-spacing:0; text-wrap:balance; }
+.po-caption .caption-word { display:inline-block; max-width:100%; overflow-wrap:anywhere; }
+.po-caption .word-captions { display:inline; padding:3px 8px; background:rgb(0 0 0 / 68%); box-decoration-break:clone; -webkit-box-decoration-break:clone; border-radius:3px; }
+.po-error { color:#ffb6b6; background:#321d22; border-radius:12px; padding:12px 16px; margin:0 var(--po-space) 20px; }
+.po-note { margin:8px var(--po-space) 20px; color:var(--po-muted); font-size:12px; }
+.po-conversation-controls { width:min(760px,100%); margin:0 auto; padding:24px var(--po-space) 30px; }
+.po-conversation-controls .po-error { margin:0 0 16px; }
+.po-followup { display:flex; align-items:flex-end; gap:3px; padding:8px; border:1px solid var(--po-border); border-radius:26px; background:color-mix(in srgb,var(--po-surface) 92%,var(--po-accent)); box-shadow:0 16px 48px rgb(0 0 0 / 12%),inset 0 1px 0 rgb(255 255 255 / 5%); }
+.po-followup:focus-within { border-color:var(--po-accent); }
+.po-followup textarea { flex:1; width:100%; min-width:0; min-height:44px; max-height:150px; field-sizing:content; resize:none; border:0; outline:none; color:var(--po-ink); background:transparent; padding:10px 12px; font-size:15px; line-height:24px; }
+.po-followup textarea:focus-visible { outline:none; }
+.po-followup textarea::placeholder { color:var(--po-muted); }
+.po-followup button { display:grid; place-items:center; flex-shrink:0; width:44px; height:44px; border-radius:50%; border:1px solid var(--po-border); background:color-mix(in srgb,var(--po-accent) 22%,var(--po-surface)); color:var(--po-ink); font-size:22px; }
+.po-followup button[aria-label="Stop generation"] { font-size:15px; }
+@container (max-width:600px) {
+  .po-chrome { flex-wrap:wrap; padding:22px var(--po-space); gap:16px; }
+  .po-composer { padding-top:20px; }
+  .po-welcome { margin-bottom:32px; }
+  .po-welcome > p:last-child { font-size:15px; }
+  .po-example-grid { grid-template-columns:1fr; gap:8px; }
+  .po-example-grid button { padding:16px; }
+  .po-example-index { float:right; margin:0 0 0 12px; }
+  .po-example-index > span { margin-left:10px; }
+  .po-example-grid strong { font-size:15px; }
+  .po-example-grid button > span:last-child { font-size:11px; }
+  .po-example-note { line-height:1.6; }
+  .po-input-card { padding:16px; border-radius:22px; }
+  .po-result-tabs { width:100%; }
+  .po-result-tabs button { flex:1; }
+}
+
+/* Hold the original SDK chapter scene until the first real frame is ready. */
+.po-video { aspect-ratio:16 / 9; }
+.prompt-output[data-orientation=portrait] .po-video { aspect-ratio:9 / 16; }
+.prompt-output .opening-chapter { position:absolute; inset:0; z-index:2; pointer-events:none; background:#000; animation:po-chapter-enter 450ms ease-out both; }
+.prompt-output .video-preparation { position:absolute; inset-inline:8%; z-index:3; display:flex; align-items:center; justify-content:flex-start; gap:10px; color:rgb(255 255 255 / 62%); font-size:clamp(11px,1.5cqw,17px); line-height:1.4; }
+.prompt-output .video-preparation-spinner { width:16px; height:16px; border:1.5px solid rgb(255 255 255 / 18%); border-top-color:rgb(255 255 255 / 75%); border-radius:50%; animation:po-preparation-spin 1s linear infinite; }
+@keyframes po-preparation-spin { to { transform:rotate(360deg); } }
+@keyframes po-chapter-enter { from { opacity:0; } to { opacity:1; } }
+@media (prefers-reduced-motion:reduce) { .prompt-output .opening-chapter,.prompt-output .video-preparation-spinner { animation:none; } }
+
+.po-followup .po-playback, .po-followup .po-sound, .po-followup .po-subtitles { border-color:transparent; background:transparent; color:var(--po-muted); }
+.po-followup .po-playback:hover:not(:disabled), .po-followup .po-sound:hover, .po-followup .po-subtitles:hover { color:var(--po-ink); background:var(--po-soft); }
+
+.po-theme-switch { display:grid; place-items:center; width:44px; height:44px; border:1px solid var(--po-border); border-radius:50%; color:var(--po-muted); background:var(--po-soft); }
+.po-theme-switch:hover { color:var(--po-ink); border-color:var(--po-accent); }
+
+.po-subtitles span { font-size:10px; font-weight:650; line-height:16px; letter-spacing:-.04em; border:1px solid currentColor; border-radius:3px; padding:0 2px; }
+.po-followup .po-subtitles[aria-pressed="true"] { color:var(--po-ink); }
+.po-subtitles[aria-pressed="true"] span { background:var(--po-ink); color:var(--po-surface); border-color:var(--po-ink); }
+
+/* Light hosts use quiet surfaces and borders, without a floating dark shadow. */
+.prompt-output[data-theme=light] :is(.po-input-card,.po-followup) { background:var(--po-soft); box-shadow:none; }
+.prompt-output[data-theme=light] .po-example-grid button { box-shadow:none; }
+.prompt-output[data-theme=light] .po-followup:focus-within, .prompt-output[data-theme=light] .po-input-card:focus-within { border-color:var(--po-accent); }
+
+.po-retry { display:block; margin-top:10px; min-height:44px; padding:10px 14px; border:1px solid currentColor; border-radius:8px; color:inherit; background:transparent; }
+
+/* Fullscreen keeps the full composed video, narration and captions in one surface. */
+.po-fullscreen { position:absolute; z-index:5; right:12px; bottom:12px; display:grid; place-items:center; width:44px; height:44px; padding:0; color:#fff; border:1px solid rgb(255 255 255 / 18%); border-radius:50%; background:rgb(0 0 0 / 38%); opacity:.7; }
+.po-fullscreen:hover,.po-fullscreen:focus-visible { opacity:1; background:rgb(0 0 0 / 70%); }
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) { --po-ink:#fff; --po-muted:#bfc2cf; --po-surface:#000; --po-soft:#181818; min-height:0; background:#000; overflow:auto; padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px); }
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-chrome,
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-result-tabs,
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-followup textarea,
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-followup button[type=submit] { display:none; }
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-result { min-height:100%; display:flex; flex-direction:column; justify-content:center; }
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-video { width:min(100%,calc((100dvh - 112px) * 16 / 9)); max-width:none; min-width:0; }
+.prompt-output[data-orientation=portrait]:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-video { width:min(100%,calc((100dvh - 112px) * 9 / 16)); }
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-conversation-controls { flex:none; width:100%; padding:12px; }
+.prompt-output:is([data-fullscreen=native],[data-fullscreen=fallback]) .po-followup { width:max-content; max-width:100%; margin:0 auto; padding:4px; gap:8px; box-shadow:none; background:#181818; }
