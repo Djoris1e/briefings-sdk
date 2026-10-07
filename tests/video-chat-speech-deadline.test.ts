@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { createVideoChatVoice } from "../src/video-chat/voice";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+let createVideoChatVoice: typeof import("../src/video-chat/voice").createVideoChatVoice;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -8,6 +8,10 @@ function deferred<T>() {
 }
 
 describe("generated speech preparation deadlines", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ createVideoChatVoice } = await import("../src/video-chat/voice"));
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -39,7 +43,9 @@ describe("generated speech preparation deadlines", () => {
     const preparing = voice.prepare("A short response.", { signal: parent.signal }).then((value) => { ready = true; return value; });
     await vi.advanceTimersByTimeAsync(3_000);
     expect(ready).toBe(false);
-    await vi.advanceTimersByTimeAsync(9_000);
+    await vi.advanceTimersByTimeAsync(36_999);
+    expect(ready).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     expect(ready).toBe(true);
     await expect(preparing).resolves.toEqual({ seconds: expect.any(Number) });
     expect(childSignal?.aborted).toBe(true);
@@ -57,6 +63,41 @@ describe("generated speech preparation deadlines", () => {
     expect(createUrl.mock.calls.length).toBe(revokeUrl.mock.calls.length);
     expect(vi.getTimerCount()).toBe(0);
     voice.dispose?.();
+  });
+
+  it.each(["request", "body", "decode"] as const)("keeps successful audio when %s takes twenty seconds", async (stage) => {
+    vi.useFakeTimers();
+    const request = deferred<Response>();
+    const body = deferred<ArrayBuffer>();
+    const decode = deferred<AudioBuffer>();
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    const decoded = { duration: 25 } as AudioBuffer;
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:late-success");
+    const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.stubGlobal("AudioContext", class {
+      decodeAudioData() { return stage === "decode" ? decode.promise : Promise.resolve(decoded); }
+    });
+    const response = new Response(bytes);
+    if (stage === "body") vi.spyOn(response, "arrayBuffer").mockReturnValue(body.promise);
+    const fallback = vi.fn();
+    const fetcher = vi.fn(() => stage === "request" ? request.promise : Promise.resolve(response));
+    const voice = createVideoChatVoice({ fetcher, onFallback: fallback });
+    let ready = false;
+    const preparing = voice.prepare("A slower successful response.").then(value => { ready = true; return value; });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(ready).toBe(false);
+    expect(fallback).not.toHaveBeenCalled();
+    request.resolve(response);
+    body.resolve(bytes);
+    decode.resolve(decoded);
+    await expect(preparing).resolves.toEqual({ seconds: 25, supportsOffsets: true });
+    await expect(voice.prepare("A slower successful response.")).resolves.toEqual({ seconds: 25, supportsOffsets: true });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(createUrl).toHaveBeenCalledOnce();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    voice.dispose?.();
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith("blob:late-success");
   });
 
   it("revokes generated audio when cancellation wins the final preparation race", async () => {
