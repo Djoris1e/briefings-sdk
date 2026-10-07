@@ -94,10 +94,10 @@ entry. It:
   response finishes, fails or is cancelled;
 - wraps every provider callback in `guardPaidProvider` so a released or aborted
   request cannot start new paid work;
-- for `action=briefing`, calls `prepareBriefing` with the Anthropic adapter's
+- for `action=briefing`, calls `prepareBriefing` with the OpenAI adapter's
   `providerText` (structured output via `output_config.format`); for everything
   else, builds `createVideoChatHandler({ hybrid: true, mediaLed: true, … })`
-  with Anthropic planning (`provider.mjs`), xAI speech (`speech.mjs`, narrator
+  with OpenAI planning (`provider.mjs`), OpenAI speech (`speech.mjs`, narrator
   plus host/analyst voices from `briefing.config.ts`), fal generated footage
   with its own per-answer clip ledger (`fal.mjs`) and Pexels stock (`stock.mjs`);
 - adds `x-briefings-resolved-video-mode` (and `x-briefings-video-fallback`

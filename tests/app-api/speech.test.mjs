@@ -1,24 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { generateSpeech } from '../../functions/_video-chat/speech.mjs';
-const env = { XAI_API_KEY: 'test-only-secret' };
+const env = { OPENAI_API_KEY: 'test-only-secret' };
 const audio = (bytes = new Uint8Array([73, 68, 51]), headers = {}) => new Response(bytes, {
   headers: { 'content-type': 'audio/mpeg', ...headers },
 });
-test('speech uses fixed Eve auto-language MP3 contract and forwards abort signal', async () => {
+test('speech uses the server-owned OpenAI MP3 contract and forwards abort signal', async () => {
   const controller = new AbortController();
   let calls = 0;
-  const result = await generateSpeech({ text: ' Hello. ', signal: controller.signal, voice_id: 'rex', model: 'expensive' }, env, async (url, init) => {
+  const result = await generateSpeech({ text: ' Hello. ', signal: controller.signal, voice: 'onyx', model: 'expensive', response_format: 'wav', instructions: 'attacker' }, env, async (url, init) => {
     calls++;
-    assert.equal(url, 'https://api.x.ai/v1/tts');
+    assert.equal(url, 'https://api.openai.com/v1/audio/speech');
     assert.equal(init.method, 'POST');
     assert.equal(init.redirect, 'manual');
     assert.equal(init.signal, controller.signal);
-    assert.equal(init.headers.Authorization, `Bearer ${env.XAI_API_KEY}`);
+    assert.equal(init.headers.Authorization, `Bearer ${env.OPENAI_API_KEY}`);
     assert.deepEqual(JSON.parse(init.body), {
-      text: 'Hello.', voice_id: 'eve', language: 'auto',
-      with_timestamps: true,
-      output_format: { codec: 'mp3', sample_rate: 24000, bit_rate: 128000 },
+      input: 'Hello.', model: 'gpt-4o-mini-tts', voice: 'marin', response_format: 'mp3',
     });
     return audio();
   });
@@ -26,79 +24,6 @@ test('speech uses fixed Eve auto-language MP3 contract and forwards abort signal
   assert.deepEqual(result, { audio: new Uint8Array([73, 68, 51]), mediaType: 'audio/mpeg' });
 });
 
-const timedAudio = (text, overrides = {}) => Response.json({
-  audio: 'SUQz', content_type: 'audio/mpeg', duration: Array.from(text).length / 10,
-  audio_timestamps: {
-    graph_chars: Array.from(text),
-    graph_times: Array.from(text, (_, index) => [index / 10, (index + 1) / 10]),
-  },
-  ...overrides,
-});
-
-test('timestamped speech returns MP3 and word spans with punctuation and Unicode intact', async () => {
-  const result = await generateSpeech({ text: ' Hi,  café! 👋 ' }, env, async () => timedAudio('Hi,  café! 👋'));
-  assert.deepEqual(result, {
-    audio: new Uint8Array([73, 68, 51]), mediaType: 'audio/mpeg',
-    wordTimings: [
-      { text: 'Hi,', start: 0, end: 0.3 },
-      { text: 'café!', start: 0.5, end: 1 },
-      { text: '👋', start: 1.1, end: 1.2 },
-    ],
-  });
-});
-
-test('interpolated character spans use the complete written-token interval', async () => {
-  const result = await generateSpeech({ text: '$5 now' }, env, async () => timedAudio('$5 now', {
-    duration: 2,
-    audio_timestamps: {
-      graph_chars: ['$', '5', ' ', 'n', 'o', 'w'],
-      graph_times: [[0, 1], [0.3, 0.6], [1, 1], [1, 1.3], [1.3, 1.6], [1.6, 2]],
-    },
-  }));
-  assert.deepEqual(result.wordTimings, [{ text: '$5', start: 0, end: 1 }, { text: 'now', start: 1, end: 2 }]);
-});
-
-test('usable audio survives missing, mismatched, oversized or invalid alignment', async () => {
-  for (const audio_timestamps of [
-    undefined, null, {}, { graph_chars: ['H', 'i'], graph_times: [[0, 0.1]] },
-    { graph_chars: ['N', 'o'], graph_times: [[0, 0.1], [0.1, 0.2]] },
-    { graph_chars: ['H', 'i'], graph_times: [[-1, 0.1], [0.1, 0.2]] },
-    { graph_chars: ['H', 'i'], graph_times: [[0.2, 0.1], [0.1, 0.2]] },
-    { graph_chars: ['H', 'i'], graph_times: [[0, 0.1], [0.1, 1]] },
-    { graph_chars: Array(1001).fill('H'), graph_times: Array(1001).fill([0, 0.1]) },
-  ]) {
-    const result = await generateSpeech({ text: 'Hi' }, env, async () => timedAudio('Hi', { audio_timestamps }));
-    assert.deepEqual(result, { audio: new Uint8Array([73, 68, 51]), mediaType: 'audio/mpeg' });
-  }
-});
-
-test('a missing or invalid provider duration drops timing while preserving usable speech', async () => {
-  for (const duration of [undefined, null, 0, -1, '0.2', 301]) {
-    const result = await generateSpeech({ text: 'Hi' }, env, async () => timedAudio('Hi', { duration }));
-    assert.deepEqual(result, { audio: new Uint8Array([73, 68, 51]), mediaType: 'audio/mpeg' });
-  }
-});
-
-test('invalid JSON envelopes and non-MP3 or oversized decoded audio are rejected safely', async () => {
-  for (const overrides of [
-    { audio: '' }, { audio: 'not base64!' }, { audio: 'a===' }, { audio: null },
-    { content_type: 'audio/wav' }, { audio: Buffer.alloc(1024 * 1024 + 1).toString('base64') },
-  ]) {
-    await assert.rejects(generateSpeech({ text: 'Hi' }, env, async () => timedAudio('Hi', overrides)), { message: 'Speech is temporarily unavailable.' });
-  }
-});
-
-test('JSON transport has a separate bounded body and accepts exactly one MiB of decoded audio', async () => {
-  const result = await generateSpeech({ text: 'Hi' }, env, async () => timedAudio('Hi', { audio: Buffer.alloc(1024 * 1024).toString('base64') }));
-  assert.equal(result.audio.byteLength, 1024 * 1024);
-  let cancelled = false;
-  const stream = new ReadableStream({
-    pull(controller) { controller.enqueue(new Uint8Array(512 * 1024)); },
-    cancel() { cancelled = true; },
-  });
-  await assert.rejects(generateSpeech({ text: 'Hi' }, env, async () => new Response(stream, { headers: { 'content-type': 'application/json' } })));
-  assert.equal(cancelled, true);
-});
 test('missing key, empty, non-string, oversized input or prior cancellation never calls provider', async () => {
   let calls = 0;
   const fetcher = async () => { calls++; return audio(); };
@@ -106,13 +31,14 @@ test('missing key, empty, non-string, oversized input or prior cancellation neve
     await assert.rejects(generateSpeech({ text }, env, fetcher), /Speech is temporarily unavailable/);
   }
   await assert.rejects(generateSpeech({ text: 'Hi' }, {}, fetcher));
+  await assert.rejects(generateSpeech({ text: 'Hi' }, { XAI_API_KEY: 'unused' }, fetcher));
   await assert.rejects(generateSpeech({ text: 'Hi', signal: AbortSignal.abort() }, env, fetcher));
   assert.equal(calls, 0);
 });
 test('redirects, provider errors and non-MP3 responses are rejected without exposing provider text', async () => {
   for (const response of [
-    new Response(env.XAI_API_KEY, { status: 302, headers: { location: 'https://evil.example' } }),
-    new Response(env.XAI_API_KEY, { status: 500 }),
+    new Response(env.OPENAI_API_KEY, { status: 302, headers: { location: 'https://evil.example' } }),
+    new Response(env.OPENAI_API_KEY, { status: 500 }),
     audio(new Uint8Array([1]), { 'content-type': 'application/json' }),
     audio(new Uint8Array([1]), { 'content-type': 'audio/wav' }),
     audio(new Uint8Array()),
@@ -121,7 +47,7 @@ test('redirects, provider errors and non-MP3 responses are rejected without expo
     await assert.rejects(generateSpeech({ text: 'Hi' }, env, async () => { calls++; return response; }), { message: 'Speech is temporarily unavailable.' });
     assert.equal(calls, 1);
   }
-  await assert.rejects(generateSpeech({ text: 'Hi' }, env, () => { throw Error(env.XAI_API_KEY); }), { message: 'Speech is temporarily unavailable.' });
+  await assert.rejects(generateSpeech({ text: 'Hi' }, env, () => { throw Error(env.OPENAI_API_KEY); }), { message: 'Speech is temporarily unavailable.' });
 });
 test('declared oversized audio is cancelled before reading', async () => {
   let cancelled = false;
@@ -167,11 +93,60 @@ test('abort during audio body consumption cancels the stream and rejects partial
 
 test('podcast roles select distinct configured voices and reject client voice injection', async () => {
   const voices = [];
-  const configured = { ...env, BRIEFING_HOST_VOICE: 'ara', BRIEFING_ANALYST_VOICE: 'leo' };
-  for (const speaker of ['host', 'analyst']) await generateSpeech({ text: 'Hello.', speaker, voice_id: 'attacker' }, configured, async (_url, init) => {
-    voices.push(JSON.parse(init.body).voice_id);
+  const configured = { ...env, BRIEFING_HOST_VOICE: 'coral', BRIEFING_ANALYST_VOICE: 'onyx' };
+  for (const speaker of ['host', 'analyst']) await generateSpeech({ text: 'Hello.', speaker, voice: 'attacker' }, configured, async (_url, init) => {
+    voices.push(JSON.parse(init.body).voice);
     return audio();
   });
-  assert.deepEqual(voices, ['ara', 'leo']);
+  assert.deepEqual(voices, ['coral', 'onyx']);
   await assert.rejects(() => generateSpeech({ text: 'Hello.', speaker: 'attacker' }, configured, () => { throw new Error('Must not fetch'); }));
+});
+
+test('default podcast roles select marin and cedar', async () => {
+  const voices = [];
+  for (const speaker of ['host', 'analyst']) await generateSpeech({ text: 'Hello.', speaker }, env, async (_url, init) => {
+    voices.push(JSON.parse(init.body).voice);
+    return audio();
+  });
+  assert.deepEqual(voices, ['marin', 'cedar']);
+});
+
+test('server speech configuration controls model, narrator and language instructions', async () => {
+  const configured = { ...env, BRIEFING_CONFIG: { speech: {
+    model: 'gpt-4o-mini-tts-2025-12-15', narrator: 'coral', language: 'nl-NL',
+  } } };
+  await generateSpeech({ text: 'Hallo.', language: 'en', instructions: 'attacker' }, configured, async (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body), {
+      input: 'Hallo.', model: 'gpt-4o-mini-tts-2025-12-15', voice: 'coral', response_format: 'mp3',
+      instructions: 'Speak in the language identified by nl-NL.',
+    });
+    return audio();
+  });
+});
+
+test('abort before provider headers cancels its body without returning audio', async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const stream = new ReadableStream({ cancel() { cancelled = true; } });
+  await assert.rejects(generateSpeech({ text: 'Hi', signal: controller.signal }, env, async () => {
+    controller.abort();
+    return new Response(stream, { headers: { 'content-type': 'audio/mpeg' } });
+  }), { message: 'Speech is temporarily unavailable.' });
+  assert.equal(cancelled, true);
+});
+
+test('audio read failures are private and release the body lock', async () => {
+  const stream = new ReadableStream({ pull(controller) { controller.error(new Error(env.OPENAI_API_KEY)); } });
+  await assert.rejects(generateSpeech({ text: 'Hi' }, env, async () => new Response(stream, {
+    headers: { 'content-type': 'audio/mpeg' },
+  })), { message: 'Speech is temporarily unavailable.' });
+  assert.equal(stream.locked, false);
+});
+
+test('invalid server configuration fails privately without calling the provider', async () => {
+  let calls = 0;
+  await assert.rejects(generateSpeech({ text: 'Hi' }, {
+    ...env, BRIEFING_CONFIG: { speech: { model: env.OPENAI_API_KEY } },
+  }, async () => { calls++; return audio(); }), { message: 'Speech is temporarily unavailable.' });
+  assert.equal(calls, 0);
 });

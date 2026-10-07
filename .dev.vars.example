@@ -1,11 +1,10 @@
 # Copy to .dev.vars. Keep keys server-side; never use VITE_ variables for them.
 # Start with real AI planning; AI footage is optional.
 # wrangler.jsonc already enables fal; no extra local flag is needed.
-ANTHROPIC_API_KEY=
+# Required for response planning, article/podcast writing and all voices.
+OPENAI_API_KEY=
 FAL_KEY=
 
-# Optional generated voice. Without it, playback has no narration.
-XAI_API_KEY=
 
 # Stock footage used alongside templates and optional AI footage.
 PEXELS_API_KEY=
@@ -15,9 +14,11 @@ PEXELS_API_KEY=
 
 # Models, voices and optional screenshot animation: briefing.config.ts.
 # Optional server environment overrides:
-# BRIEFING_PLANNER_MODEL=claude-haiku-4-5
-# BRIEFING_NARRATOR_VOICE=eve
-# BRIEFING_HOST_VOICE=eve
-# BRIEFING_ANALYST_VOICE=leo
+# BRIEFING_PLANNER_MODEL=gpt-6-luna
+# BRIEFING_REASONING_EFFORT=none
+# BRIEFING_SPEECH_MODEL=gpt-4o-mini-tts
+# BRIEFING_NARRATOR_VOICE=marin
+# BRIEFING_HOST_VOICE=marin
+# BRIEFING_ANALYST_VOICE=cedar
 # BRIEFING_LANGUAGE=auto
 # BRIEFING_ANIMATE_SCREENSHOTS=false

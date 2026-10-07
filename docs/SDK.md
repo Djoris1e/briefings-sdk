@@ -199,8 +199,8 @@ Edit root `briefing.config.ts` for the reference application:
 import { defineBriefingConfig } from "./src/briefing/config";
 
 export default defineBriefingConfig({
-  planner: { model: "claude-haiku-4-5" },
-  speech: { narrator: "eve", host: "eve", analyst: "leo", language: "auto" },
+  planner: { model: "gpt-6-luna", reasoningEffort: "none" },
+  speech: { model: "gpt-4o-mini-tts", narrator: "marin", host: "marin", analyst: "cedar", language: "auto" },
   video: {
     model: "minimax/h3-max-turbo/text-to-video",
     screenshotModel: "minimax/h3-max-turbo/image-to-video",
@@ -219,15 +219,18 @@ Copy `.dev.vars.example` to ignored `.dev.vars` and set server-only credentials:
 
 | Key | Reference adapter use |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | Canonical briefing and video text planning |
-| `XAI_API_KEY` | Narrator and two podcast voices |
+| `OPENAI_API_KEY` | Canonical briefing, video planning, narrator and two podcast voices |
 | `PEXELS_API_KEY` | Optional stock footage within mixed videos |
 | `FAL_KEY` | Optional generated video and explicitly enabled screenshot animation |
 
 Do not put secrets in `briefing.config.ts`, browser bundles or `VITE_` variables.
 The reference adapter also accepts trusted server `BRIEFING_CONFIG` overrides
-and specific environment overrides for planner model, voices, language and
-screenshot animation. Request bodies cannot choose provider credentials, models
+and specific environment overrides for planner model, reasoning effort, speech model, voices, language and
+screenshot animation. `BRIEFING_REASONING_EFFORT=omit` omits the reasoning
+parameter for models without it; otherwise choose an effort supported by the
+configured model. Token ceilings include reasoning tokens, so reasoning-enabled
+models need adequate headroom. The speech adapter supports `gpt-4o-mini-tts`
+and its dated snapshots. Request bodies cannot choose provider credentials, models
 or arbitrary voice IDs.
 
 ## Canonical content and limits
@@ -250,8 +253,8 @@ One admitted `action=briefing` request accepts `{prompt, screenshots?}` and retu
 The model selects server-numbered source IDs instead of copying quotations. The
 server restores the exact source text as evidence and expands host/analyst
 exchanges into alternating turns. Provider adapters must enforce `outputSchema`
-when supported; the Anthropic adapter sends it as `output_config.format`
-([provider documentation](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)).
+when supported; the OpenAI adapter sends it as `text.format` with `strict: true`
+([provider documentation](https://developers.openai.com/api/docs/guides/structured-outputs)).
 The authored shape is `{summary, article, facts:[{id,text,sourceId}], priorities,
 podcast:{exchanges:{opening,detail,closing}}}`; the public return shape above
 preserves compatibility with records without an article. Each podcast slot contains
@@ -338,7 +341,9 @@ content policy. Import the SDK CSS once and let the host bundler serve its lazy
 JavaScript chunks.
 
 Captions follow provider word timings and the actual speech audio clock when
-available, with a less precise fallback when alignment is absent. The podcast
+available, with a less precise fallback when alignment is absent. The reference
+OpenAI speech adapter returns MP3 audio without word timestamps, so its captions
+use that estimated fallback. The podcast
 plays bounded turns in order using two configured voices. Do not represent
 browser autoplay permission as guaranteed: podcast Play remains an explicit
 user action.
@@ -397,8 +402,9 @@ later scenes so generation can run ahead of playback. Source images keep their
 original aspect ratio and have source labels; generated and stock visuals are
 illustrations. Text-only treatment is a fallback when suitable media is
 unavailable. The opening chapter is visible immediately while the first useful
-scene is prepared. The demo now selects Sonnet 4.6 in `briefing.config.ts` for
-more demanding content and visual planning; hosts can change that setting.
+scene is prepared. The demo selects `gpt-6-luna` with reasoning disabled in `briefing.config.ts`
+for quick incremental planning; hosts can change the model and reasoning effort.
+Live output quality and latency must be assessed separately from fixture tests.
 
 ## Editorial template system
 

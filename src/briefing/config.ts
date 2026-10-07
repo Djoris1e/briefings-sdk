@@ -1,15 +1,15 @@
 /** Server-owned provider settings. Never accept this object from a browser request. */
 export interface BriefingProviderConfig {
-  planner: { provider: "anthropic"; model: string; briefingTokens: number; briefingTimeoutMs: number; videoTokens: number };
-  speech: { provider: "xai"; narrator: string; host: string; analyst: string; language: string };
+  planner: { provider: "openai"; model: string; reasoningEffort: "none" | "low" | "medium" | "high" | null; briefingTokens: number; briefingTimeoutMs: number; videoTokens: number };
+  speech: { provider: "openai"; model: string; narrator: string; host: string; analyst: string; language: string };
   video: { provider: "fal"; model: "minimax/h3-max-turbo/text-to-video";
     screenshotModel: "minimax/h3-max-turbo/image-to-video"; animateScreenshots: boolean; resolution: "768P"; timeoutMs: number };
   stock: { provider: "pexels" };
 }
 export type BriefingProviderOptions = { [K in keyof BriefingProviderConfig]?: Partial<BriefingProviderConfig[K]> };
 export const DEFAULT_PROVIDER_CONFIG: BriefingProviderConfig = {
-  planner: { provider: "anthropic", model: "claude-haiku-4-5", briefingTokens: 6144, briefingTimeoutMs: 90_000, videoTokens: 4096 },
-  speech: { provider: "xai", narrator: "eve", host: "eve", analyst: "leo", language: "auto" },
+  planner: { provider: "openai", model: "gpt-6-luna", reasoningEffort: "none", briefingTokens: 6144, briefingTimeoutMs: 90_000, videoTokens: 4096 },
+  speech: { provider: "openai", model: "gpt-4o-mini-tts", narrator: "marin", host: "marin", analyst: "cedar", language: "auto" },
   video: { provider: "fal", model: "minimax/h3-max-turbo/text-to-video", screenshotModel: "minimax/h3-max-turbo/image-to-video", animateScreenshots: false, resolution: "768P", timeoutMs: 45_000 },
   stock: { provider: "pexels" },
 };
@@ -20,8 +20,10 @@ export function defineBriefingConfig(options: BriefingProviderOptions = {}): Bri
     video: { ...DEFAULT_PROVIDER_CONFIG.video, ...options.video },
     stock: { ...DEFAULT_PROVIDER_CONFIG.stock, ...options.stock },
   };
-  if (config.planner.provider !== "anthropic" || config.speech.provider !== "xai" || config.video.provider !== "fal" || config.stock.provider !== "pexels") throw new Error("Unsupported provider: supply a custom SDK provider adapter instead.");
+  if (config.planner.provider !== "openai" || config.speech.provider !== "openai" || config.video.provider !== "fal" || config.stock.provider !== "pexels") throw new Error("Unsupported provider: supply a custom SDK provider adapter instead.");
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/.test(config.planner.model)) throw new Error("Invalid planner model.");
+  if (config.planner.reasoningEffort !== null && !["none", "low", "medium", "high"].includes(config.planner.reasoningEffort)) throw new Error("Invalid reasoning effort.");
+  if (config.speech.model !== "gpt-4o-mini-tts" && !/^gpt-4o-mini-tts-\d{4}-\d{2}-\d{2}$/.test(config.speech.model)) throw new Error("Unsupported speech model: use gpt-4o-mini-tts or a dated snapshot.");
   for (const key of ["briefingTokens", "videoTokens"] as const) {
     if (!Number.isInteger(config.planner[key]) || config.planner[key] < 512 || config.planner[key] > 8192) throw new Error("Planner tokens must be between 512 and 8192.");
   }

@@ -1,3 +1,4 @@
+import { openaiText } from "../support/openai.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -9,7 +10,7 @@ import { actorHash, reserveQuota } from "../../functions/_video-chat/quota.mjs";
 function environment() {
   const sql = new DatabaseSync(":memory:");
   sql.exec(readFileSync(new URL("../../migrations/0001_video_chat_quotas.sql", import.meta.url), "utf8"));
-  return { ANTHROPIC_API_KEY: "test-only", VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters",
+  return { OPENAI_API_KEY: "test-only", VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters",
     VIDEO_CHAT_QUOTAS: { sql, prepare(query) { return { bind(...args) { return {
       async first() { return sql.prepare(query).get(...args); },
       async run() { return { meta: { changes: Number(sql.prepare(query).run(...args).changes) } }; },
@@ -25,7 +26,7 @@ function request(body = { prompt }, { action = "briefing", signal, headers } = {
   return new Request(`https://example.com/api/video-chat?action=${action}`, { method: "POST", signal,
     headers: { origin: "https://example.com", "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", ...headers }, body: JSON.stringify(body) });
 }
-const providerAnswer = value => Response.json({ content: [{ type: "text", text: JSON.stringify(value) }] });
+const providerAnswer = value => Response.json(openaiText(JSON.stringify(value)));
 const active = env => env.VIDEO_CHAT_QUOTAS.sql.prepare("SELECT COUNT(*) AS count FROM video_chat_requests WHERE released = 0").get().count;
 const noProvider = () => { assert.fail("Rejected request must not reach any provider"); };
 
@@ -34,12 +35,12 @@ test("briefing creates one admitted canonical record without calling media/speec
   const response = await handleVideoChatRequest({ request: request({ prompt, screenshots: [screenshot] }), env,
     fetcher: async (url, options) => {
       count++;
-      assert.equal(url, "https://api.anthropic.com/v1/messages");
+      assert.equal(url, "https://api.openai.com/v1/responses");
       assert.equal(active(env), 1);
       const sent = JSON.parse(options.body);
       assert.equal(sent.stream, false);
-      assert.ok(!sent.system.includes(prompt));
-      assert.deepEqual(JSON.parse(sent.messages[0].content), { sources: [{ id: "source1", text: prompt }], screenshots: [{ id: screenshot.id, alt: screenshot.alt }] });
+      assert.ok(!sent.instructions.includes(prompt));
+      assert.deepEqual(JSON.parse(sent.input[0].content), { sources: [{ id: "source1", text: prompt }], screenshots: [{ id: screenshot.id, alt: screenshot.alt }] });
       return providerAnswer(authored());
     } });
   assert.equal(response.status, 200);
