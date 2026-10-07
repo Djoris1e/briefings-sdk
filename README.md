@@ -40,8 +40,7 @@ npm run dev
 ```
 
 Open [localhost:4300](http://localhost:4300). Put server-side credentials in the
-ignored `.dev.vars`: `ANTHROPIC_API_KEY` (briefing and video planning),
-`XAI_API_KEY` (narrator and two podcast voices), `PEXELS_API_KEY` (optional stock
+ignored `.dev.vars`: `OPENAI_API_KEY` (responses, video planning, narrator and two podcast voices), `PEXELS_API_KEY` (optional stock
 footage), `FAL_KEY` (optional generated video). Provider calls cost money; the
 local runner enables them, hosted configuration keeps them disabled until a host
 opts in. No key belongs in browser code or `VITE_` variables. Models and voices

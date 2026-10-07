@@ -6,8 +6,10 @@ export function providerConfig(env = {}) {
   const base = env.BRIEFING_CONFIG ? defineBriefingConfig(env.BRIEFING_CONFIG) : projectConfig;
   return defineBriefingConfig({
     ...base,
-    planner: { ...base.planner, ...(env.BRIEFING_PLANNER_MODEL ? { model: env.BRIEFING_PLANNER_MODEL } : {}) },
+    planner: { ...base.planner, ...(env.BRIEFING_PLANNER_MODEL ? { model: env.BRIEFING_PLANNER_MODEL } : {}),
+      ...(env.BRIEFING_REASONING_EFFORT ? { reasoningEffort: env.BRIEFING_REASONING_EFFORT === "omit" ? null : env.BRIEFING_REASONING_EFFORT } : {}) },
     speech: { ...base.speech,
+      ...(env.BRIEFING_SPEECH_MODEL ? { model: env.BRIEFING_SPEECH_MODEL } : {}),
       ...(env.BRIEFING_NARRATOR_VOICE ? { narrator: env.BRIEFING_NARRATOR_VOICE } : {}),
       ...(env.BRIEFING_HOST_VOICE ? { host: env.BRIEFING_HOST_VOICE } : {}),
       ...(env.BRIEFING_ANALYST_VOICE ? { analyst: env.BRIEFING_ANALYST_VOICE } : {}),

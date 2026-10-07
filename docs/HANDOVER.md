@@ -93,8 +93,9 @@ browser and logs only fixed classifications. The host must:
   the pre-briefing `compose` action, and `x-briefings-*` header and storage
   names. They are unreachable from the embed but reachable by any same-origin
   caller; remove them or rename deliberately with their tests.
-- Without an `XAI_API_KEY` the podcast steps through the transcript silently
-  rather than reporting that speech is unavailable.
+- Responses and speech now share `OPENAI_API_KEY`; a missing key fails setup.
+  OpenAI speech has no word timestamps, so captions use estimated alignment.
+  The OpenAI migration still needs a separately budgeted live quality/latency run.
 - Tabs lack arrow-key navigation; the seek slider step is 0.1 seconds; a few
   secondary controls are under 44 pixels; the follow-up field relies on a
   Chrome-only auto-sizing property.

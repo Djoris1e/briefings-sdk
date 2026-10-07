@@ -28,15 +28,13 @@ and `APP_API_PORT` override the ports.
 ## Provider keys
 
 Keys go in ignored `.dev.vars`, never in `briefing.config.ts`, browser code or
-`VITE_` variables. Restart `npm run dev` after changing them. Every key below
-calls a paid cloud API; a single briefing makes one Anthropic structured-output
-call, one streamed Anthropic planning call, several speech calls and up to
+`VITE_` variables. Restart `npm run dev` after changing them. OpenAI and fal calls cost money; a single briefing makes one OpenAI structured-output
+call, one streamed OpenAI planning call, several speech calls and up to
 five fal clips on localhost. Tests never use these keys.
 
 | Key | Used for |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | Required. Briefing preparation (text, podcast script, article) and video shot planning |
-| `XAI_API_KEY` | Narrator voice and the two podcast voices, with word timings for captions |
+| `OPENAI_API_KEY` | Required. Briefing preparation, video shot planning, narrator and two podcast voices |
 | `FAL_KEY` | Generated footage (MiniMax H3 Max Turbo) and, when enabled, screenshot animation |
 | `PEXELS_API_KEY` | Stock footage for scenes that are not generated |
 
@@ -49,16 +47,13 @@ variables (`BRIEFING_PLANNER_MODEL`, `BRIEFING_HOST_VOICE`, …; see
 
 The behaviour comes from `configurationStatus` in `functions/api/video-chat.mjs`.
 
-- Without `ANTHROPIC_API_KEY`, nothing works. Every `/api/video-chat` operation
+- Without `OPENAI_API_KEY`, nothing works. Every `/api/video-chat` operation
   returns `503 setup_required` naming the missing binding, and the component
   shows a generic "could not prepare" error. There is no offline or mocked mode
   in the running app.
-- Without `XAI_API_KEY`, the status reports `speech: "silent"` and the speech
-  action answers `204`. Video plays without narration over its music bed, and
-  the podcast has no audio: Play steps through the transcript with estimated
-  durations and no sound. (A speech provider that fails, rather than one that
-  is absent, shows "Podcast speech is unavailable" instead.) The text tab is
-  unaffected.
+- The same OpenAI key enables speech. Failed synthesis shows a retryable speech
+  error; captions use estimated timing because this speech adapter returns audio
+  without word timestamps. No separate xAI key is needed.
 - Without `FAL_KEY` but with `PEXELS_API_KEY`, the route switches the video to
   Pexels mode before planning; scenes use templates plus stock footage.
 - Without `FAL_KEY` and without `PEXELS_API_KEY`, video uses the authored

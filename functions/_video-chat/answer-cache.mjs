@@ -1,14 +1,11 @@
 import { encodeVideoSseEvent, videoSseHeaders } from "../../src/protocol/sse.ts";
-import { providerConfig } from './config.mjs';
 import {
-  MAX_CACHED_SPEECH_BYTES,
   MAX_RECORDED_ANSWER_BYTES,
   answerCacheMaterial,
   answerObjectKey,
   parseRecordedAnswer,
   replayAnswerEvents,
   replayMusic,
-  speechObjectKey,
   suggestionsObjectKey,
 } from "../../src/server/answer-cache.ts";
 
@@ -72,12 +69,4 @@ async function cachedJsonResponse(env, key, maximum, headers) {
 
 export function cachedSuggestionsResponse({ env, body, headers }) {
   return suggestionsObjectKey(body).then((key) => cachedJsonResponse(env, key, MAX_RECORDED_ANSWER_BYTES, headers));
-}
-
-export function cachedSpeechResponse({ env, body, headers }) {
-  // Old recorded speech has no voice identity. Never replay it for dialogue or
-  // a customized narrator; each live voice client maintains its own audio cache.
-  const config = providerConfig(env);
-  if (body?.speaker || config.speech.narrator !== 'eve' || config.speech.language !== 'auto') return Promise.resolve(null);
-  return speechObjectKey(body).then((key) => cachedJsonResponse(env, key, MAX_CACHED_SPEECH_BYTES, headers));
 }

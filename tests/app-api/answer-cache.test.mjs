@@ -2,12 +2,13 @@ import { openaiDelta, openaiCompletedSse } from "../support/openai.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { decodeVideoSse } from "../../src/protocol/sse.ts";
 import { applyVideoEvent, createVideoState } from "../../src/protocol/state.ts";
 import { checksumVideo } from "../../src/protocol/checksum.ts";
 import { getMusicTrack } from "../../src/music-catalog.ts";
-import { answerMediaUrls, answerObjectKey, clipObjectKey, linesFromEvents, recordAnswer, speechObjectKey, suggestionsObjectKey } from "../../src/server/answer-cache.ts";
+import { answerMediaUrls, answerObjectKey, clipObjectKey, linesFromEvents, recordAnswer, suggestionsObjectKey } from "../../src/server/answer-cache.ts";
 import { createVideoChatHandler } from "../../src/server/create-video-chat-handler.ts";
 import { handleVideoChatRequest } from "../../functions/api/video-chat.mjs";
 
@@ -223,7 +224,7 @@ test("recorded suggestions replay while legacy speech always uses an admitted Op
   const speech = { audio: "SUQz", mediaType: "audio/mpeg", wordTimings: [{ text: "Orbit", start: 0, end: 0.2 }, { text: "detail", start: 0.2, end: 0.4 }, { text: "0.", start: 0.4, end: 0.6 }] };
   const objects = new Map([
     [await suggestionsObjectKey({ prompt: PROMPT, lines: recorded.lines }), suggestions],
-    [await speechObjectKey({ text: "Orbit detail 0." }), speech],
+    [`speech/${createHash("sha256").update("Orbit detail 0.").digest("hex")}.json`, speech],
   ]);
   let speechCalls = 0;
   const env = liveEnv({ VIDEO_CHAT_ANSWER_CACHE: bucket(objects) });

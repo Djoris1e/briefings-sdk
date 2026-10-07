@@ -9,12 +9,14 @@ preview wires them in `functions/api/video-chat.mjs` using the adapters in
 
 ## Reference adapters
 
-- `provider.mjs`: Anthropic Messages API. `providerText` handles bounded tasks
-  and the structured `briefing` task (schema sent as `output_config.format`);
+- `provider.mjs`: OpenAI Responses API. `providerText` handles bounded tasks
+  and the structured `briefing` task (schema sent as `text.format` with `strict: true`);
   `providerStream` streams the video plan. Model and token ceilings come from
-  `briefing.config.ts` through `config.mjs`.
-- `speech.mjs`: xAI text-to-speech with character timestamps turned into word
-  timings. `speaker` absent selects the narrator voice; `host`/`analyst` select
+  `briefing.config.ts` through `config.mjs`. Requests use `store: false`;
+  incomplete, refused and failed responses are rejected. The default planner is
+  `gpt-6-luna` with reasoning disabled to preserve incremental startup.
+- `speech.mjs`: OpenAI text-to-speech (`gpt-4o-mini-tts`), returning MP3 audio
+  without word timestamps. The player uses estimated caption timing. `speaker` absent selects the narrator voice; `host`/`analyst` select
   the two podcast voices. All three are server configuration.
 - `fal.mjs`: MiniMax H3 Max Turbo text-to-video (and image-to-video for
   explicitly enabled screenshot animation) at 768P, with a per-answer clip
@@ -23,7 +25,7 @@ preview wires them in `functions/api/video-chat.mjs` using the adapters in
 - `quota.mjs`, `provider-admission.mjs`: IP-hash admission and the guard that
   stops paid callbacks after release or abort.
 
-Set `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `FAL_KEY` and `PEXELS_API_KEY` in
+Set `OPENAI_API_KEY`, `FAL_KEY` and `PEXELS_API_KEY` in
 ignored `.dev.vars` locally. The committed `wrangler.jsonc` sets
 `VIDEO_CHAT_FAL_PREVIEW=enabled`, which fal requires in addition to its key.
 
@@ -47,6 +49,10 @@ another planning run.
 
 Pass both prompt strings unchanged. Credentials and media URLs never belong in
 either. See the [callback reference](reference/provider-adapters.md).
+
+Existing archived speech is never replayed by the reference route: those recordings
+do not identify the provider/model/voice. Each live client still caches audio for
+its current session.
 
 ## Speech
 

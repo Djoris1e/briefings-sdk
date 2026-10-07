@@ -20,7 +20,7 @@ import { generateSpeech } from "../_video-chat/speech.mjs";
 import { welcomeMedia } from "../_video-chat/welcome-media.mjs";
 import { withDeadline } from "../../src/video-chat/deadline.ts";
 import { guardPaidProvider } from "../_video-chat/provider-admission.mjs";
-import { bypassRequested, cachedAnswerResponse, cachedSpeechResponse, cachedSuggestionsResponse, configuredAnswerCache } from "../_video-chat/answer-cache.mjs";
+import { bypassRequested, cachedAnswerResponse, cachedSuggestionsResponse, configuredAnswerCache } from "../_video-chat/answer-cache.mjs";
 
 const POST_ACTIONS = new Set([
   "briefing",
@@ -45,7 +45,7 @@ function generatedVideoConfigured(env) {
 // Return only binding names and public capabilities, never credential values.
 export function configurationStatus(env) {
   const missing = [];
-  if (!configured(env.ANTHROPIC_API_KEY)) missing.push("ANTHROPIC_API_KEY");
+  if (!configured(env.OPENAI_API_KEY)) missing.push("OPENAI_API_KEY");
   const generatedVideo = generatedVideoConfigured(env);
   const stockVideo = configured(env.PEXELS_API_KEY);
   if (typeof env.VIDEO_CHAT_QUOTAS?.prepare !== "function") missing.push("VIDEO_CHAT_QUOTAS");
@@ -57,7 +57,7 @@ export function configurationStatus(env) {
     ready: missing.length === 0,
     missing,
     videoMode: generatedVideo || !stockVideo ? "cinematic" : "pexels",
-    speech: configured(env.XAI_API_KEY) ? "generated" : "silent",
+    speech: configured(env.OPENAI_API_KEY) ? "generated" : "silent",
   };
 }
 async function readBounded(request) {
@@ -162,14 +162,12 @@ export async function handleVideoChatRequest({
       ? await cachedAnswerResponse({ env, body, origin: url.origin, headers: HEADERS, diagnosticId })
       : action === "suggestions"
       ? await cachedSuggestionsResponse({ env, body, headers: HEADERS })
-      : action === "speech" && !body.speaker && configured(env.XAI_API_KEY)
-      ? await cachedSpeechResponse({ env, body, headers: HEADERS })
       : null;
     if (cached) return cached;
   }
   let reservation;
   let actor;
-  if (PAID_ACTIONS.has(action) || (action === "speech" && configured(env.XAI_API_KEY))) {
+  if (PAID_ACTIONS.has(action) || (action === "speech" && configured(env.OPENAI_API_KEY))) {
     const ip = local ? "127.0.0.1" : request.headers.get("cf-connecting-ip");
     if (!ip)
       return error(
@@ -311,7 +309,7 @@ export async function handleVideoChatRequest({
       // The atomic ledger, not the planner's callback count, owns AI spending.
       maxGeneratedVideos: !owner && planningAllowance.limit > 0 ? PUBLIC_LIFETIME_CLIPS : planningAllowance.limit,
       generateVideoTimeoutMs: providerConfig(env).video.timeoutMs,
-      ...(configured(env.XAI_API_KEY) ? {
+      ...(configured(env.OPENAI_API_KEY) ? {
         generateSpeech: guardPaidProvider("generateSpeech", admission, (context) => generateSpeech(context, env, fetcher)),
       } : {}),
       ...(wantsGeneratedVideo && generatedVideoConfigured(env) ? {

@@ -6,7 +6,7 @@ import { parseVideoEvent } from "../protocol/validation.js";
 import { parseVideo } from "../protocol/persistence.js";
 import { chooseAnswerMusic, createMusicAudio, getMusicTrack, type MusicPreference } from "../music-catalog.js";
 import type { VideoChatConversationTurn } from "../video-chat/types.js";
-import { parseResponseRequest, parseSpeechRequest, parseSuggestionsRequest } from "./video-chat-input.js";
+import { parseResponseRequest, parseSuggestionsRequest } from "./video-chat-input.js";
 
 /**
  * Owner-recorded answers replayed for identical public requests.
@@ -19,7 +19,6 @@ import { parseResponseRequest, parseSpeechRequest, parseSuggestionsRequest } fro
 const RECORDED_ANSWER_VERSION = 1;
 const MEDIA_ROUTE = "/api/media/";
 export const MAX_RECORDED_ANSWER_BYTES = 512_000;
-export const MAX_CACHED_SPEECH_BYTES = 2_000_000;
 const MAX_RECORDED_EVENTS = 200;
 const OPENING_EVENT = "data.video-chat-opening";
 
@@ -80,12 +79,6 @@ export async function suggestionsObjectKey(body: unknown): Promise<string | null
   let parsed;
   try { parsed = parseSuggestionsRequest(body); } catch { return null; }
   return `suggestions/${await sha256Hex(stableJson(parsed))}.json`;
-}
-
-export async function speechObjectKey(body: unknown): Promise<string | null> {
-  let parsed;
-  try { parsed = parseSpeechRequest(body); } catch { return null; }
-  return `speech/${await sha256Hex(parsed.text)}.json`;
 }
 
 export function clipObjectKey(sha256: string): string {
