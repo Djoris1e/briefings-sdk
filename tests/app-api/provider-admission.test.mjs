@@ -58,7 +58,7 @@ test('an already canceled runtime task never invokes the paid callback', async (
 test('future runtime operations and wrong methods cannot reach admission or providers', async () => {
   const { handleVideoChatRequest } = await import('../../functions/api/video-chat.mjs');
   let queries = 0, calls = 0;
-  const env = { ANTHROPIC_API_KEY: 'test-only', VIDEO_CHAT_QUOTA_SALT: 's'.repeat(32),
+  const env = { OPENAI_API_KEY: 'test-only', VIDEO_CHAT_QUOTA_SALT: 's'.repeat(32),
     VIDEO_CHAT_QUOTAS: { prepare() { queries++; throw Error('No query expected'); } } };
   for (const [method, action] of [['POST', 'future-generation'], ['POST', 'transcribe'], ['POST', 'capabilities'], ['GET', 'response']]) {
     const request = new Request(`https://example.com/api/video-chat?action=${action}`, { method,

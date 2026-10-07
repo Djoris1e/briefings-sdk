@@ -1,3 +1,4 @@
+import { openaiDelta, openaiCompletedSse } from "../support/openai.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -11,7 +12,7 @@ function environment() {
   for (const migration of ["0001_video_chat_quotas", "0002_fal_preview", "0004_public_fal_answers", "0005_double_public_fal_allowance", "0006_daily_public_clip_budget", "0003_owner_fal_previews"]) {
     sql.exec(readFileSync(new URL(`../../migrations/${migration}.sql`, import.meta.url), "utf8"));
   }
-  return { ANTHROPIC_API_KEY: "test-anthropic", PEXELS_API_KEY: "test-pexels", FAL_KEY: "test-fal",
+  return { OPENAI_API_KEY: "test-openai", PEXELS_API_KEY: "test-pexels", FAL_KEY: "test-fal",
     VIDEO_CHAT_FAL_PREVIEW: "enabled", VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters",
     VIDEO_CHAT_QUOTAS: { sql, prepare(query) { return { bind(...args) { return {
       async first() { return sql.prepare(query).get(...args); },
@@ -31,10 +32,10 @@ function providers(env, body, { stockMiss = false } = {}) {
     { type: "answer", intent: "explanation", musicMood: "off", opening: "", subject: "supplied facts", development: "Explain every important point.", visualDirection: "Natural light." },
     template("Opening fact"), { ...template("Useful next step"), type: "ending" }, template("Important condition"), ...body,
   ];
-  const sse = records.map(record => `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: JSON.stringify(record) + "\n" } })}\n\n`).join("");
+  const sse = records.map(record => `data: ${JSON.stringify(openaiDelta(JSON.stringify(record) + "\n"))}\n\n`).join("") + openaiCompletedSse;
   const fetcher = async (url, options) => {
     assert.equal(env.VIDEO_CHAT_QUOTAS.sql.prepare("SELECT COUNT(*) AS count FROM video_chat_requests WHERE released = 0").get().count, 1);
-    if (url === "https://api.anthropic.com/v1/messages") {
+    if (url === "https://api.openai.com/v1/responses") {
       counters.planning++;
       return new Response(sse);
     }

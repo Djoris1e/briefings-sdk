@@ -1,3 +1,4 @@
+import { openaiText, openaiDelta, openaiCompleted, openaiCompletedSse } from "../support/openai.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -59,7 +60,7 @@ const request = (
   });
 const live = () => ({
   PEXELS_API_KEY: "test-stock",
-  ANTHROPIC_API_KEY: "test-only-value",
+  OPENAI_API_KEY: "test-only-value",
   VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters",
   VIDEO_CHAT_QUOTAS: db(),
 });
@@ -201,8 +202,9 @@ test("successful live operations use the fixed provider and bounded output token
   for await (const text of plannerStream({
     userPrompt: "Why does the Moon turn?",
   })) {
-    providerSse += `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text } })}\n\n`;
+    providerSse += `data: ${JSON.stringify(openaiDelta(text))}\n\n`;
   }
+  providerSse += openaiCompletedSse;
   for (const [action, body, limit] of [
     ["response", { prompt: "Why does the Moon turn?" }, 4096],
     [
@@ -235,34 +237,22 @@ test("successful live operations use the fixed provider and bounded output token
         if (String(url).startsWith("https://api.pexels.com/")) return Response.json({videos:[]});
         calls++;
         const payload = JSON.parse(options.body);
-        assert.equal(url, "https://api.anthropic.com/v1/messages");
-        assert.equal(payload.model, "claude-sonnet-4-6");
+        assert.equal(url, "https://api.openai.com/v1/responses");
+        assert.equal(payload.model, "gpt-6-luna");
+        assert.equal(payload.store, false);
+        assert.deepEqual(payload.reasoning, { effort: "none" });
+        assert.equal(options.headers.authorization, "Bearer test-only-value");
         assert.equal(options.redirect, "manual");
-        assert.equal(payload.max_tokens, limit);
+        assert.equal(payload.max_output_tokens, limit);
         assert.ok(
-          payload.system.length + payload.messages[0].content.length <= 60000,
+          payload.instructions.length + payload.input[0].content.length <= 60000,
         );
         assert.equal(payload.stream, action === "response");
         assert.ok(options.signal instanceof AbortSignal);
         if (payload.stream) return new Response(providerSse);
-        return Response.json({
-          content: [
-            {
-              type: "text",
-              text:
-                action === "suggestions"
-                  ? JSON.stringify({
-                      suggestions: [
-                        {
-                          prompt: "How long does an orbit take?",
-                          keyword: "moon",
-                        },
-                      ],
-                    })
-                  : "The Moon turns in step with its orbit.",
-            },
-          ],
-        });
+        return Response.json(openaiText(action === "suggestions"
+          ? JSON.stringify({ suggestions: [{ prompt: "How long does an orbit take?", keyword: "moon" }] })
+          : "The Moon turns in step with its orbit."));
       },
     });
     assert.equal(response.status, 200);
@@ -302,15 +292,15 @@ for (const embedded of [false, true]) test(`response planning preserves its gram
     env: live(),
     fetcher: async (url, options) => {
       if (String(url).startsWith("https://api.pexels.com/")) return Response.json({ videos: [] });
-      assert.equal(url, "https://api.anthropic.com/v1/messages");
+      assert.equal(url, "https://api.openai.com/v1/responses");
       plannerCalls++;
       const payload = JSON.parse(options.body);
       assert.equal(payload.stream, true);
-      assert.equal(payload.messages[0].role, "user");
-      assert.ok(payload.messages[0].content.includes(prompt));
+      assert.equal(payload.input[0].role, "user");
+      assert.ok(payload.input[0].content.includes(prompt));
       // Inspect the actual serialized record contracts after admission and all
       // callback wrappers, without depending on the surrounding guidance prose.
-      const contracts = payload.system.split("\n").flatMap(line => {
+      const contracts = payload.instructions.split("\n").flatMap(line => {
         const start = line.search(/\{\s*"type"\s*:/);
         return start < 0 ? [] : [JSON.parse(line.slice(start, line.lastIndexOf("}") + 1))];
       });
@@ -324,9 +314,9 @@ for (const embedded of [false, true]) test(`response planning preserves its gram
       }
       const records = [];
       for (let offset = 0; offset < modelText.length; offset += 37) {
-        records.push({ type: "content_block_delta", delta: { type: "text_delta", text: modelText.slice(offset, offset + 37) } });
+        records.push(openaiDelta(modelText.slice(offset, offset + 37)));
       }
-      records.push({ type: "message_delta", delta: { stop_reason: "end_turn" } });
+      records.push(openaiCompleted());
       return new Response(records.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
     },
   });
@@ -424,10 +414,10 @@ for (const identity of ["public", "owner", "forged", "local", "local-flag-remote
     ...templateLead('moon'),
     ...[0,1,2,3].map(i => ({ type: 'shot', ...shot(`Orbit detail ${i}.`, `moon orbit ${i}`) })),
   ];
-  const sse = lines.map(line => `data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:JSON.stringify(line)+'\n'}})}\n\n`).join('');
+  const sse = lines.map(line => `data: ${JSON.stringify(openaiDelta(JSON.stringify(line)+'\n'))}\n\n`).join('') + openaiCompletedSse;
   const fetcher = async (url, options) => {
     if (String(url) === env.ACCESS_TEAM_DOMAIN+'/cdn-cgi/access/certs') return Response.json({keys:[jwk]});
-    if (url === 'https://api.anthropic.com/v1/messages') return new Response(sse);
+    if (url === 'https://api.openai.com/v1/responses') return new Response(sse);
     if (options.method === 'POST') {
       submissions++;
       assert.equal(url,'https://queue.fal.run/minimax/h3-max-turbo/text-to-video');
@@ -515,29 +505,36 @@ test("public stock actions require the same atomic admission as other live work"
 });
 
 
-test('xAI speech capability requires a configured secret', async () => {
+test('OpenAI speech capability requires a configured secret', async () => {
   for (const [env, host, enabled] of [
-    [live(), 'example.com', false],
-    [{...live(), XAI_API_KEY:'test-xai'}, 'example.com', true],
+    [{...live(), OPENAI_API_KEY:''}, 'example.com', false],
+    [{...live(), OPENAI_API_KEY:'test-openai'}, 'example.com', true],
 
   ]) {
     const response = await handleVideoChatRequest({request:new Request(`https://${host}/api/video-chat?action=capabilities`),env,fetcher:()=>{throw Error('No paid capability calls');}});
     const capabilities = await response.json();
-    assert.equal(capabilities.generatedSpeech,enabled);
-    assert.equal(capabilities.transcription,false);
+    if (!enabled) {
+      assert.equal(response.status, 503);
+      assert.deepEqual(capabilities.missing, ['OPENAI_API_KEY']);
+      assert.equal(capabilities.speech, 'silent');
+    } else {
+      assert.equal(response.status, 200);
+      assert.equal(capabilities.generatedSpeech, true);
+      assert.equal(capabilities.transcription, false);
+    }
   }
 });
 
-test('xAI speech returns private audio beyond100 cumulative units while retaining throughput admission', async () => {
-  const env = {...live(),XAI_API_KEY:'private-test-xai'};
+test('OpenAI speech returns private audio beyond100 cumulative units while retaining throughput admission', async () => {
+  const env = {...live(),OPENAI_API_KEY:'private-test-openai'};
   const actor = await actorHash('192.0.2.1',env.VIDEO_CHAT_QUOTA_SALT);
   const old = await reserveQuota(env.VIDEO_CHAT_QUOTAS,actor,96);
   await releaseQuota(env.VIDEO_CHAT_QUOTAS,old);
   let calls = 0;
   const fetcher = async (url,options) => {
     calls++;
-    assert.equal(url,'https://api.x.ai/v1/tts');
-    assert.equal(JSON.parse(options.body).voice_id,'eve');
+    assert.equal(url,'https://api.openai.com/v1/audio/speech');
+    assert.equal(JSON.parse(options.body).voice,'marin');
     return new Response(new Uint8Array([73,68,51]),{headers:{'content-type':'audio/mpeg'}});
   };
   const response = await handleVideoChatRequest({request:request('speech',{text:'a'.repeat(1000)}),env,fetcher});
@@ -551,38 +548,38 @@ test('xAI speech returns private audio beyond100 cumulative units while retainin
   assert.equal(calls,2);
 });
 
-test('speech validates bounds, identity and quota storage before contacting xAI', async () => {
+test('speech validates bounds, identity and quota storage before contacting OpenAI', async () => {
   let calls=0;
   const fetcher=()=>{calls++;throw Error('Unexpected provider call');};
   for (const body of [{text:''},{text:'a'.repeat(1001)},{text:'Hello',voice:'rex'},{text:42}]) {
-    const response=await handleVideoChatRequest({request:request('speech',body),env:{...live(),XAI_API_KEY:'test'},fetcher});
+    const response=await handleVideoChatRequest({request:request('speech',body),env:{...live(),OPENAI_API_KEY:'test'},fetcher});
     assert.equal(response.status,400);
   }
   const incoming=request('speech',{text:'Hello'});
   incoming.headers.delete('cf-connecting-ip');
-  assert.equal((await handleVideoChatRequest({request:incoming,env:{...live(),XAI_API_KEY:'test'},fetcher})).status,503);
-  const broken={...live(),XAI_API_KEY:'test',VIDEO_CHAT_QUOTAS:{prepare(){throw Error('offline');}}};
+  assert.equal((await handleVideoChatRequest({request:incoming,env:{...live(),OPENAI_API_KEY:'test'},fetcher})).status,503);
+  const broken={...live(),OPENAI_API_KEY:'test',VIDEO_CHAT_QUOTAS:{prepare(){throw Error('offline');}}};
   assert.equal((await handleVideoChatRequest({request:request('speech',{text:'Hello'}),env:broken,fetcher})).status,503);
   assert.equal(calls,0);
 });
 
-test('missing xAI key continues silently without spending', async () => {
-  for (const env of [live()]) {
+test('legacy provider keys cannot replace the required OpenAI key', async () => {
+  for (const env of [{...live(), OPENAI_API_KEY:'', ANTHROPIC_API_KEY:'legacy', XAI_API_KEY:'legacy'}]) {
     const response=await handleVideoChatRequest({request:request('speech',{text:'Hello'}),env,fetcher:()=>{throw Error('No provider call');}});
-    assert.equal(response.status,204);
+    assert.equal(response.status,503);
   }
 });
 
-test('xAI failure is sanitized and still counts towards the minute rate', async () => {
-  const env={...live(),XAI_API_KEY:'private-xai-test'};
+test('OpenAI failure is sanitized and still counts towards the minute rate', async () => {
+  const env={...live(),OPENAI_API_KEY:'private-openai-test'};
   const actor=await actorHash('192.0.2.1',env.VIDEO_CHAT_QUOTA_SALT);
   for (let i=0;i<19;i++) {
     const id=await reserveQuota(env.VIDEO_CHAT_QUOTAS,actor,1);
     await releaseQuota(env.VIDEO_CHAT_QUOTAS,id);
   }
-  const response=await handleVideoChatRequest({request:request('speech',{text:'Hello'}),env,fetcher:async()=>new Response('private-xai-test',{status:401})});
+  const response=await handleVideoChatRequest({request:request('speech',{text:'Hello'}),env,fetcher:async()=>new Response('private-openai-test',{status:401})});
   assert.equal(response.status,502);
-  assert.doesNotMatch(await response.text(),/private-xai-test/);
+  assert.doesNotMatch(await response.text(),/private-openai-test/);
   const denied=await handleVideoChatRequest({request:request('speech',{text:'Hello'}),env,fetcher:()=>{throw Error('No provider call after rate limit');}});
   assert.equal(denied.status,429);
 });
@@ -653,9 +650,9 @@ test('live dynamic follow-ups use reviewed topic covers with one admitted text c
     env: live(),
     fetcher: async (url, options) => {
       calls++;
-      assert.equal(url, 'https://api.anthropic.com/v1/messages');
-      assert.match(JSON.parse(options.body).system, /keyword: "ocean waves"/);
-      return Response.json({content:[{type:'text', text:JSON.stringify({suggestions})}]});
+      assert.equal(url, 'https://api.openai.com/v1/responses');
+      assert.match(JSON.parse(options.body).instructions, /keyword: "ocean waves"/);
+      return Response.json(openaiText(JSON.stringify({suggestions})));
     },
   });
   assert.equal(response.status, 200);
@@ -666,7 +663,7 @@ test('live dynamic follow-ups use reviewed topic covers with one admitted text c
 });
 
 test('one answer plus opening and speech burst reproduces request throttling without a video allowance error', async () => {
-  const env = {...live(), XAI_API_KEY:'test-speech'};
+  const env = {...live(), OPENAI_API_KEY:'test-speech'};
   const actor = await actorHash('192.0.2.1',env.VIDEO_CHAT_QUOTA_SALT);
   // A streaming answer, opening-media and two speech preparations occupy all four slots.
   const held = await Promise.all([8,1,1,1].map(units=>reserveQuota(env.VIDEO_CHAT_QUOTAS,actor,units)));
@@ -688,7 +685,7 @@ test('Pexels completes a full stock answer without reading or reserving fal allo
   const called=[];
   const response=await handleVideoChatRequest({request:request('response',{prompt:'A golfer hits a ball',mode:'pexels'}),env,fetcher:async url=>{
     called.push(url);
-    if(url==='https://api.anthropic.com/v1/messages')return new Response(`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:hybridBriefText(brief)}})}\n\n`);
+    if(url==='https://api.openai.com/v1/responses')return new Response(`data: ${JSON.stringify(openaiDelta(hybridBriefText(brief)))}\n\n` + openaiCompletedSse);
     assert.equal(new URL(url).pathname,'/v1/videos/search');
     return Response.json({videos:[{id:12,url:'https://www.pexels.com/video/golfer-hitting-ball-12/',video_files:[{file_type:'video/mp4',width:1280,height:720,link:'https://videos.pexels.com/video-files/golf.mp4'}]}]});
   }});
@@ -707,9 +704,9 @@ test('missing generated video resolves to Pexels before planning and capability 
     const brief={type:'answer',opening:'Watch the golfer prepare the next swing',subject:shot.subject,development:'',ending:shot};
     let plans=0, footage=0;
     const response=await handleVideoChatRequest({request:request('response',{prompt:'Show a golf swing',mode:'cinematic'}),env,fetcher:async url=>{
-      if (url==='https://api.anthropic.com/v1/messages') {
+      if (url==='https://api.openai.com/v1/responses') {
         plans++;
-        return new Response(`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:hybridBriefText(brief)}})}\n\n`);
+        return new Response(`data: ${JSON.stringify(openaiDelta(hybridBriefText(brief)))}\n\n` + openaiCompletedSse);
       }
       assert.match(url,/^https:\/\/api.pexels.com\//);
       footage++;
@@ -731,9 +728,9 @@ test('dynamic suggestion subjects use admitted bounded Pexels search even withou
  const calls=[];
  const response=await handleVideoChatRequest({request:request('suggestions',{prompt:'Tell a story about a dog at the beach',lines:['A dog plays at the beach.']}),env,fetcher:async (url,options)=>{
   calls.push(url);
-  if(url==='https://api.anthropic.com/v1/messages') {
-   const input=JSON.parse(options.body);assert.match(input.messages[0].content,/Tell a story about a dog at the beach/);assert.match(input.messages[0].content,/A dog plays at the beach/);
-   return Response.json({content:[{type:'text',text:JSON.stringify({suggestions:[{prompt:'What does the dog find?',keyword:'dog beach'}]})}]});
+  if(url==='https://api.openai.com/v1/responses') {
+   const input=JSON.parse(options.body);assert.match(input.input[0].content,/Tell a story about a dog at the beach/);assert.match(input.input[0].content,/A dog plays at the beach/);
+   return Response.json(openaiText(JSON.stringify({suggestions:[{prompt:'What does the dog find?',keyword:'dog beach'}]})));
   }
   const target=new URL(url);assert.equal(target.origin+target.pathname,'https://api.pexels.com/v1/videos/search');
   assert.equal(target.searchParams.get('query'),'dog beach');assert.equal(target.searchParams.get('per_page'),'12');assert.equal(options.headers.Authorization,'test-stock');
@@ -751,9 +748,9 @@ test('exhausted personal AI allowance resolves to stock before planning without 
  const shot={title:'Ocean waves',narration:'Waves break as they reach shallow water.',subject:'ocean waves',action:'Waves break',durationSec:5,continuity:'cut'};
  let stockCalls=0;
  const response=await handleVideoChatRequest({request:request('response',{prompt:'Explain waves',mode:'cinematic'}),env,fetcher:async(url)=>{
-  if(url==='https://api.anthropic.com/v1/messages') {
+  if(url==='https://api.openai.com/v1/responses') {
    const brief={type:'answer',opening:'Watch waves reach the shore',subject:'ocean waves',development:'',ending:shot};
-   return new Response(`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:hybridBriefText(brief)}})}\n\n`);
+   return new Response(`data: ${JSON.stringify(openaiDelta(hybridBriefText(brief)))}\n\n` + openaiCompletedSse);
   }
   assert.match(url,/api.pexels.com/);stockCalls++;
   return Response.json({videos:[{url:'https://www.pexels.com/video/ocean-waves-123/',video_files:[{file_type:'video/mp4',width:1280,height:720,link:'https://videos.pexels.com/video-files/waves.mp4'}]}]});
@@ -776,7 +773,7 @@ test('an answer spends its last AI credit then continues every remaining shot wi
  ];
  let generated=0,stock=0;
  const response=await handleVideoChatRequest({request:request('response',{prompt:'Explain ocean waves',mode:'cinematic'}),env,fetcher:async(url)=>{
-  if(url==='https://api.anthropic.com/v1/messages') return new Response(records.map(record=>`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:JSON.stringify(record)+'\n'}})}\n\n`).join(''));
+  if(url==='https://api.openai.com/v1/responses') return new Response(records.map(record=>`data: ${JSON.stringify(openaiDelta(JSON.stringify(record)+'\n'))}\n\n`).join('') + openaiCompletedSse);
   if(url==='https://queue.fal.run/minimax/h3-max-turbo/text-to-video') {
    generated++;
    return Response.json({request_id:'test',status_url:'https://queue.fal.run/status',response_url:'https://queue.fal.run/result',cancel_url:'https://queue.fal.run/cancel'});
@@ -833,9 +830,9 @@ for (const scenario of ['personal-race','clip-race','global-limit','ledger-error
   };
  }
  const response=await handleVideoChatRequest({request:request('response',{prompt:'Explain waves',mode:'cinematic'}),env,fetcher:async(url)=>{
-  if(url==='https://api.anthropic.com/v1/messages') {
+  if(url==='https://api.openai.com/v1/responses') {
    if(scenario==='personal-race') await seedPublicAttempts(env.VIDEO_CHAT_QUOTAS, actor);
-   return new Response(`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:records.map(record=>JSON.stringify(record)).join('\n')+'\n'}})}\n\n`);
+   return new Response(`data: ${JSON.stringify(openaiDelta(records.map(record=>JSON.stringify(record)).join('\n')+'\n'))}\n\n` + openaiCompletedSse);
   }
   if(url.startsWith('https://queue.fal.run/')) {generated++;return new Response('',{status:503});}
   assert.match(url,/api.pexels.com/);stock++;
@@ -864,13 +861,13 @@ for (const scenario of ['personal-race','clip-race','global-limit','ledger-error
 
 test('setup requires real planning but footage is optional and secrets stay private', async () => {
   assert.deepEqual(configurationStatus({}), {
-    ready:false, missing:['ANTHROPIC_API_KEY','VIDEO_CHAT_QUOTAS','VIDEO_CHAT_QUOTA_SALT'], videoMode:'cinematic',speech:'silent',
+    ready:false, missing:['OPENAI_API_KEY','VIDEO_CHAT_QUOTAS','VIDEO_CHAT_QUOTA_SALT'], videoMode:'cinematic',speech:'silent',
   });
-  assert.deepEqual(configurationStatus(live()), {ready:true,missing:[],videoMode:'pexels',speech:'silent'});
-  assert.deepEqual(configurationStatus({...live(),FAL_KEY:'private',VIDEO_CHAT_FAL_PREVIEW:'enabled',XAI_API_KEY:'private'}),
+  assert.deepEqual(configurationStatus(live()), {ready:true,missing:[],videoMode:'pexels',speech:'generated'});
+  assert.deepEqual(configurationStatus({...live(),FAL_KEY:'private',VIDEO_CHAT_FAL_PREVIEW:'enabled',OPENAI_API_KEY:'private'}),
     {ready:true,missing:[],videoMode:'cinematic',speech:'generated'});
   assert.equal(configurationStatus({...live(),FAL_KEY:'private',PEXELS_API_KEY:undefined}).ready,true);
-  const response = await handleVideoChatRequest({request:new Request('https://example.com/api/video-chat?action=status'),env:{ANTHROPIC_API_KEY:'private-value'}});
+  const response = await handleVideoChatRequest({request:new Request('https://example.com/api/video-chat?action=status'),env:{OPENAI_API_KEY:'private-value'}});
   assert.equal(response.status,200);
   assert.doesNotMatch(await response.text(),/private-value/);
 });
@@ -879,10 +876,10 @@ test('planner-only configuration completes a narrated template answer without fo
   const env = {...live(), PEXELS_API_KEY:undefined};
   let plans = 0;
   const response = await handleVideoChatRequest({request:request('response',{prompt:'Explain waves',mode:'cinematic'}),env,fetcher:async url => {
-    assert.equal(url, 'https://api.anthropic.com/v1/messages');
+    assert.equal(url, 'https://api.openai.com/v1/responses');
     plans++;
     const ending = {narration:'Wind gives waves their energy.',title:'Wind powers waves',subject:'ocean waves',action:'',durationSec:5,continuity:'cut'};
-    return new Response(`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:JSON.stringify({type:'answer',opening:'Wind powers waves',subject:'ocean waves',development:'',ending})}})}\n\n`);
+    return new Response(`data: ${JSON.stringify(openaiDelta(JSON.stringify({type:'answer',opening:'Wind powers waves',subject:'ocean waves',development:'',ending})))}\n\n` + openaiCompletedSse);
   }});
   assert.equal(response.status,200);
   const output = await response.text();
@@ -892,7 +889,7 @@ test('planner-only configuration completes a narrated template answer without fo
 });
 
 test('disabled provider environment refuses preview requests even with all credentials and forged enable headers', async () => {
-  const env = {...live(),VIDEO_CHAT_PAID_PROVIDERS:'disabled',FAL_KEY:'private',VIDEO_CHAT_FAL_PREVIEW:'enabled',XAI_API_KEY:'private'};
+  const env = {...live(),VIDEO_CHAT_PAID_PROVIDERS:'disabled',FAL_KEY:'private',VIDEO_CHAT_FAL_PREVIEW:'enabled',OPENAI_API_KEY:'private'};
   assert.deepEqual(configurationStatus(env).missing,['VIDEO_CHAT_PAID_PROVIDERS']);
   for (const action of ['response','speech','suggestions','opening-media']) {
     const response = await handleVideoChatRequest({request:request(action,{prompt:'Tell me about waves',text:'Hello'},{'x-briefings-staging-token':'enabled'}),env,fetcher:()=>assert.fail('No provider in preview')});
@@ -904,7 +901,7 @@ test('local identity is permitted only with explicit local binding and a loopbac
   for (const [url,local,expected] of [['http://localhost:8788',true,200],['http://127.0.0.1:8788',true,200],['https://example.com',true,503],['http://localhost:8788',false,503]]) {
     const env={...live(),...(local?{VIDEO_CHAT_LOCAL:'enabled'}:{})};
     let calls=0;
-    const response=await handleVideoChatRequest({request:new Request(url+'/api/video-chat?action=narration',{method:'POST',headers:{origin:url,'content-type':'application/json'},body:JSON.stringify({prompt:'Moon',scene:{id:'s',templateId:'cinemaMedia',variables:{fallbackText:'Moon'}},earlier:[]})}),env,fetcher:async()=>{calls++;return Response.json({content:[{type:'text',text:'The Moon turns.'}]});}});
+    const response=await handleVideoChatRequest({request:new Request(url+'/api/video-chat?action=narration',{method:'POST',headers:{origin:url,'content-type':'application/json'},body:JSON.stringify({prompt:'Moon',scene:{id:'s',templateId:'cinemaMedia',variables:{fallbackText:'Moon'}},earlier:[]})}),env,fetcher:async()=>{calls++;return Response.json(openaiText('The Moon turns.'));}});
     assert.equal(response.status,expected);
     await response.text();
     assert.equal(calls,expected===200?1:0);
@@ -921,10 +918,10 @@ for (const raced of [false,true]) test(`FAL-only exhaustion retains chapter reco
   let plans=0;
   const shot={narration:'Waves break in shallow water.',subject:'ocean waves',action:'Waves break',durationSec:5,continuity:'cut'};
   const response=await handleVideoChatRequest({request:request('response',{prompt:'Explain waves',mode:'cinematic'}),env,fetcher:async url=>{
-    assert.equal(url,'https://api.anthropic.com/v1/messages');
+    assert.equal(url,'https://api.openai.com/v1/responses');
     plans++;
     if (raced) await exhaust();
-    return new Response(`data: ${JSON.stringify({type:'content_block_delta',delta:{type:'text_delta',text:hybridBriefText({type:'answer',opening:'Watch waves reach the shore',subject:'ocean waves',development:'',ending:shot})}})}\n\n`);
+    return new Response(`data: ${JSON.stringify(openaiDelta(hybridBriefText({type:'answer',opening:'Watch waves reach the shore',subject:'ocean waves',development:'',ending:shot})))}\n\n` + openaiCompletedSse);
   }});
   assert.equal(response.status,200);
   const output=await response.text();

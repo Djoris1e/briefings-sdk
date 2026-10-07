@@ -1,3 +1,4 @@
+import { openaiDelta, openaiCompletedSse } from "../support/openai.mjs";
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createPlannerDiagnostics } from '../../functions/_video-chat/diagnostics.mjs';
@@ -38,9 +39,9 @@ test('diagnostics bound event volume and counts; logging failure never breaks re
 test('provider stream reports only bounded completion metadata and leaves text unchanged', async () => {
   const reports = [];
   const records = [
-    { type: 'message_start', message: { usage: { input_tokens: 9 }, content: 'secret' } },
-    { type: 'content_block_delta', delta: { type: 'text_delta', text: 'private model text' } },
-    { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 4096 }, private: 'secret' },
+    { type: 'response.created', response: { status: 'in_progress', private: 'secret' } },
+    openaiDelta('private model text'),
+    { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 9, output_tokens: 4096 }, private: 'secret' } },
   ];
   const fetcher = async () => new Response(records.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''));
   const context = { systemPrompt: 'private', userPrompt: 'private', signal: new AbortController().signal };
@@ -50,14 +51,14 @@ test('provider stream reports only bounded completion metadata and leaves text u
   assert.equal(reports.length, 1);
   const [{firstTextMs, durationMs, ...report}] = reports;
   assert.ok(firstTextMs >= 0 && firstTextMs <= durationMs);
-  assert.deepEqual(report, { outcome: 'complete', stopReason: 'max_tokens', inputTokens: 9, outputTokens: 4096 });
+  assert.deepEqual(report, { outcome: 'complete', stopReason: 'end_turn', inputTokens: 9, outputTokens: 4096 });
 });
 
 test('provider failure and unknown completion values remain private', async () => {
   const reports = [];
   const context = { systemPrompt: 'Test', userPrompt: 'Test', signal: new AbortController().signal };
   const fetcher = async () => new Response([
-    { type: 'message_delta', delta: { stop_reason: 'private-secret' }, usage: { output_tokens: 1e20 } },
+    { type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'private-secret' }, usage: { output_tokens: 1e20 } } },
     { type: 'error', error: { message: 'private-secret' } },
   ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(''));
   await assert.rejects(async () => { for await (const text of providerStream(context, {}, fetcher, event => reports.push(event))) { assert.equal(typeof text, "string"); } }, /Provider stream failed/);
@@ -65,6 +66,27 @@ test('provider failure and unknown completion values remain private', async () =
   const [{durationMs, ...report}] = reports;
   assert.ok(durationMs >= 0);
   assert.deepEqual(report, { outcome: 'error', stopReason: 'unknown', inputTokens: 0, outputTokens: 4096 });
+});
+
+test('OpenAI token exhaustion reports bounded diagnostics and never completes successfully', async () => {
+  const reports = [];
+  const records = [openaiDelta('private model text'), {
+    type: 'response.incomplete', response: { status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      usage: { input_tokens: 9, output_tokens: 1e20 }, private: 'secret',
+    },
+  }];
+  let output = '';
+  await assert.rejects(async () => {
+    for await (const text of providerStream({ systemPrompt: 'private', userPrompt: 'private', signal: new AbortController().signal }, {},
+      async () => new Response(records.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')), event => reports.push(event))) output += text;
+  }, /Provider stream failed/);
+  assert.equal(output, 'private model text');
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].outcome, 'error');
+  assert.equal(reports[0].stopReason, 'max_tokens');
+  assert.equal(reports[0].outputTokens, 4096);
+  assert.doesNotMatch(JSON.stringify(reports), /private|secret/);
 });
 
 test('provider timing distinguishes first text from completion without recording text', async (t) => {
@@ -77,7 +99,7 @@ test('provider timing distinguishes first text from completion without recording
     now = 250;
     return new Response(new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"private text"}}\n\n'));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(openaiDelta('private text'))}\n\n${openaiCompletedSse}`));
         controller.close();
       },
     }));

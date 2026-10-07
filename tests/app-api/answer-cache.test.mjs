@@ -1,3 +1,4 @@
+import { openaiDelta, openaiCompletedSse } from "../support/openai.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -45,10 +46,10 @@ const plannerLines = [
   { type: "answer", intent: "explanation", musicMood: "calm", opening: "The Moon turns in time with Earth", subject: "moon", development: "Rotation and orbit", visualDirection: "Consistent gray Moon illustration", ending: shot("Rotation stays in step.", "moon ending") },
   ...[0, 1].map((i) => ({ type: "shot", ...shot(`Orbit detail ${i}.`, `moon orbit ${i}`) })),
 ];
-const plannerSse = plannerLines.map((line) => `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: JSON.stringify(line) + "\n" } })}\n\n`).join("");
+const plannerSse = plannerLines.map((line) => `data: ${JSON.stringify(openaiDelta(JSON.stringify(line) + "\n"))}\n\n`).join("") + openaiCompletedSse;
 
 function liveEnv(extra = {}) {
-  return { ANTHROPIC_API_KEY: "test-only-value", VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters", VIDEO_CHAT_QUOTAS: db(),
+  return { OPENAI_API_KEY: "test-only-value", VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters", VIDEO_CHAT_QUOTAS: db(),
     VIDEO_CHAT_FAL_PREVIEW: "enabled", FAL_KEY: "test-fal-secret", ...extra };
 }
 
@@ -56,7 +57,7 @@ function providers(counter, responseSse = plannerSse) {
   let clip = 0;
   return async (url, options) => {
     counter.calls++;
-    if (url === "https://api.anthropic.com/v1/messages") return new Response(responseSse);
+    if (url === "https://api.openai.com/v1/responses") return new Response(responseSse);
     if (options?.method === "POST" && String(url).startsWith("https://queue.fal.run/")) {
       clip++;
       return Response.json({ request_id: `clip-${clip}`, status_url: `https://queue.fal.run/status/${clip}`, response_url: `https://queue.fal.run/result/${clip}`, cancel_url: "https://queue.fal.run/cancel" });
@@ -194,7 +195,7 @@ test("unusable recordings fall through to a live answer", async (t) => {
   const liveSse = [...plannerLines,
     { type: "shot", ...shot("The Moon follows a repeating orbit.", "moon orbit path") },
     { type: "shot", ...shot("Rotation and orbit stay synchronized.", "moon synchronized motion"), footageSource: "generated" },
-  ].map(line => `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: JSON.stringify(line) + "\n" } })}\n\n`).join("");
+  ].map(line => `data: ${JSON.stringify(openaiDelta(JSON.stringify(line) + "\n"))}\n\n`).join("") + openaiCompletedSse;
   for (const stored of [
     "not json at all",
     { ...recorded, version: 2 },
@@ -215,7 +216,7 @@ test("unusable recordings fall through to a live answer", async (t) => {
   }
 });
 
-test("recorded suggestions and speech replay only for their exact inputs, speech only with generated voice", async (t) => {
+test("recorded suggestions replay while legacy speech always uses an admitted OpenAI request", async (t) => {
   const { recorded } = await recording(t);
   assert.deepEqual(recorded.lines, expectedLines);
   const suggestions = { suggestions: [{ prompt: "How far is the Moon?", media: null }] };
@@ -224,18 +225,26 @@ test("recorded suggestions and speech replay only for their exact inputs, speech
     [await suggestionsObjectKey({ prompt: PROMPT, lines: recorded.lines }), suggestions],
     [await speechObjectKey({ text: "Orbit detail 0." }), speech],
   ]);
-  const fetcher = () => { throw Error("live"); };
-  const env = liveEnv({ VIDEO_CHAT_ANSWER_CACHE: bucket(objects), XAI_API_KEY: "test-xai" });
+  let speechCalls = 0;
+  const env = liveEnv({ VIDEO_CHAT_ANSWER_CACHE: bucket(objects) });
+  const fetcher = async (url, options) => {
+    assert.equal(url, "https://api.openai.com/v1/audio/speech");
+    assert.equal(JSON.parse(options.body).voice, "marin");
+    assert.equal((await env.VIDEO_CHAT_QUOTAS.prepare("SELECT COUNT(*) AS count FROM video_chat_requests WHERE released = 0").bind().first()).count, 1);
+    speechCalls++;
+    return new Response(new Uint8Array([73, 68, 51, 4]), { headers: { "content-type": "audio/mpeg" } });
+  };
   const hit = await handleVideoChatRequest({ request: request("https://example.com", "suggestions", { prompt: ` ${PROMPT}`, lines: recorded.lines.map((line) => ` ${line} `) }), env, fetcher });
   assert.equal(hit.status, 200);
   assert.deepEqual(await hit.json(), suggestions);
   const spoken = await handleVideoChatRequest({ request: request("https://example.com", "speech", { text: " Orbit detail 0. " }), env, fetcher });
   assert.equal(spoken.status, 200);
   assert.equal(spoken.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await spoken.json(), speech);
-  assert.equal((await env.VIDEO_CHAT_QUOTAS.prepare("SELECT COUNT(*) AS count FROM video_chat_requests").bind().first()).count, 0);
-  const silent = await handleVideoChatRequest({ request: request("https://example.com", "speech", { text: "Orbit detail 0." }), env: liveEnv({ VIDEO_CHAT_ANSWER_CACHE: bucket(objects) }), fetcher });
-  assert.equal(silent.status, 204);
+  assert.deepEqual([...new Uint8Array(await spoken.arrayBuffer())], [73, 68, 51, 4]);
+  assert.equal(speechCalls, 1);
+  assert.equal((await env.VIDEO_CHAT_QUOTAS.prepare("SELECT COUNT(*) AS count FROM video_chat_requests").bind().first()).count, 1);
+  const unavailable = await handleVideoChatRequest({ request: request("https://example.com", "speech", { text: "Orbit detail 0." }), env: liveEnv({ VIDEO_CHAT_ANSWER_CACHE: bucket(objects), OPENAI_API_KEY: "", XAI_API_KEY: "legacy" }), fetcher });
+  assert.equal(unavailable.status, 503);
   let liveCalls = 0;
   const missLines = await handleVideoChatRequest({ request: request("https://example.com", "suggestions", { prompt: PROMPT, lines: recorded.lines.slice(1) }), env, fetcher: () => { liveCalls++; throw Error("live"); } });
   assert.deepEqual(await missLines.json(), { suggestions: [] });

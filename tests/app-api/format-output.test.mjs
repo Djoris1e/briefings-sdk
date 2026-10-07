@@ -1,3 +1,4 @@
+import { openaiText, openaiDelta, openaiCompletedSse } from "../support/openai.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -23,7 +24,7 @@ function database() {
   };
 }
 const environment = () => ({
-  ANTHROPIC_API_KEY: "test-only-anthropic",
+  OPENAI_API_KEY: "test-only-openai",
   VIDEO_CHAT_QUOTA_SALT: "test-salt-that-is-at-least-32-characters",
   VIDEO_CHAT_QUOTAS: database(),
 });
@@ -34,7 +35,7 @@ function request(body = { prompt: "Explain why leaves change color.", format: "t
     headers: { origin, "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", ...options.headers },
   });
 }
-const providerAnswer = text => Response.json({ content: [{ type: "text", text }] });
+const providerAnswer = text => Response.json(openaiText(text));
 const released = env => env.VIDEO_CHAT_QUOTAS.sql.prepare("SELECT COUNT(*) AS count FROM video_chat_requests WHERE released = 0").get().count;
 
 for (const format of ["text", "podcast"]) {
@@ -53,11 +54,11 @@ for (const format of ["text", "podcast"]) {
     assert.deepEqual(await response.json(), { text: expected });
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://api.anthropic.com/v1/messages");
+    assert.equal(calls[0].url, "https://api.openai.com/v1/responses");
     assert.equal(calls[0].body.stream, false);
-    assert.equal(calls[0].body.max_tokens, 512);
-    assert.equal(calls[0].body.model, "claude-sonnet-4-6");
-    assert.deepEqual(JSON.parse(calls[0].body.messages[0].content), { prompt });
+    assert.equal(calls[0].body.max_output_tokens, 512);
+    assert.equal(calls[0].body.model, "gpt-6-luna");
+    assert.deepEqual(JSON.parse(calls[0].body.input[0].content), { prompt });
     assert.equal(released(env), 0);
   });
 }
@@ -69,9 +70,9 @@ test("compose keeps untrusted prompt text out of server instructions and selects
     const response = await handleVideoChatRequest({ request: request({ prompt, format }), env: environment(),
       fetcher: async (_url, options) => {
         const body = JSON.parse(options.body);
-        systems.push(body.system);
-        assert.ok(!body.system.includes(prompt));
-        assert.deepEqual(JSON.parse(body.messages[0].content), { prompt });
+        systems.push(body.instructions);
+        assert.ok(!body.instructions.includes(prompt));
+        assert.deepEqual(JSON.parse(body.input[0].content), { prompt });
         return providerAnswer("Please supply the release notes to summarize the updates.");
       } });
     assert.equal(response.status, 200);
@@ -108,11 +109,29 @@ test("compose retains origin, trusted identity, configuration and quota admissio
   noIdentity.headers.delete("cf-connecting-ip");
   assert.equal((await handleVideoChatRequest({ request: noIdentity, env, fetcher: noProvider })).status, 503);
   assert.equal((await handleVideoChatRequest({ request: request(), env: { ...env, VIDEO_CHAT_PAID_PROVIDERS: "disabled" }, fetcher: noProvider })).status, 503);
-  assert.equal((await handleVideoChatRequest({ request: request(), env: { ...env, ANTHROPIC_API_KEY: "" }, fetcher: noProvider })).status, 503);
+  assert.equal((await handleVideoChatRequest({ request: request(), env: { ...env, OPENAI_API_KEY: "" }, fetcher: noProvider })).status, 503);
   const actor = await actorHash("192.0.2.1", env.VIDEO_CHAT_QUOTA_SALT);
   for (let index = 0; index < 4; index++) await reserveQuota(env.VIDEO_CHAT_QUOTAS, actor, 1);
   const throttled = await handleVideoChatRequest({ request: request(), env, fetcher: noProvider });
   assert.equal(throttled.status, 429);
+});
+
+test("legacy provider keys alone cannot enable response, compose, briefing or speech", async () => {
+  for (const [action, body] of [
+    ["response", { prompt: "Explain this fact." }],
+    ["compose", { prompt: "Explain this fact.", format: "text" }],
+    ["briefing", { prompt: "Explain this fact." }],
+    ["speech", { text: "Explain this fact." }],
+  ]) {
+    const env = { ...environment(), OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "legacy", XAI_API_KEY: "legacy" };
+    const response = await handleVideoChatRequest({ request: request(body, { action }), env,
+      fetcher: () => assert.fail("Legacy credentials must never authorize provider work") });
+    assert.equal(response.status, 503);
+    const result = await response.json();
+    assert.equal(result.error.code, "setup_required");
+    assert.deepEqual(result.missing, ["OPENAI_API_KEY"]);
+    assert.equal(env.VIDEO_CHAT_QUOTAS.sql.prepare("SELECT COUNT(*) AS count FROM video_chat_requests").get().count, 0);
+  }
 });
 
 test("own-key loopback compose works without a Cloudflare identity but keeps quota admission", async () => {
@@ -181,7 +200,7 @@ for (const format of ["text", "podcast"]) {
       let seen;
       const response = await handleVideoChatRequest({ request: request({ prompt, format }), env: environment(),
         fetcher: async (_url, options) => {
-          seen = JSON.parse(JSON.parse(options.body).messages[0].content).prompt;
+          seen = JSON.parse(JSON.parse(options.body).input[0].content).prompt;
           return providerAnswer("The supplied material has been converted without dropping its final facts.");
         } });
       assert.equal(response.status, 200);
@@ -198,16 +217,16 @@ test("video sends a large brief through all request and planner boundaries witho
     { type: "shot", title: "Essential facts", narration: "The supplied material establishes the relevant facts.", subject: "source material", action: "", visual: { templateId: "chapterTitle", variables: { title: "Essential facts" } } },
     { type: "ending", title: "What follows", narration: "Use those facts to choose the next practical step.", subject: "next step", action: "", visual: { templateId: "chapterTitle", variables: { title: "What follows" } } },
   ];
-  const stream = records.map(record => `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: JSON.stringify(record) + "\n" } })}\n\n`).join("");
+  const stream = records.map(record => `data: ${JSON.stringify(openaiDelta(JSON.stringify(record) + "\n"))}\n\n`).join("") + openaiCompletedSse;
   for (const prompt of prompts) {
     let calls = 0;
     const response = await handleVideoChatRequest({ request: request({ prompt }, { action: "response" }), env: environment(),
       fetcher: async (url, options) => {
         calls++;
-        assert.equal(url, "https://api.anthropic.com/v1/messages");
+        assert.equal(url, "https://api.openai.com/v1/responses");
         const input = JSON.parse(options.body);
         assert.equal(input.stream, true);
-        assert.ok(input.messages[0].content.includes(prompt), "the complete original brief must reach planning");
+        assert.ok(input.input[0].content.includes(prompt), "the complete original brief must reach planning");
         return new Response(stream, { headers: { "content-type": "text/event-stream" } });
       } });
     assert.equal(response.status, 200);
