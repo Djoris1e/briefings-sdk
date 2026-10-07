@@ -14,7 +14,7 @@ preview wires them in `functions/api/video-chat.mjs` using the adapters in
   `providerStream` streams the video plan. Model and token ceilings come from
   `briefing.config.ts` through `config.mjs`. Requests use `store: false`;
   incomplete, refused and failed responses are rejected. The default planner is
-  `gpt-6-luna` with reasoning disabled to preserve incremental startup.
+  `gpt-6-sol` with reasoning disabled to preserve incremental startup.
 - `speech.mjs`: OpenAI text-to-speech (`gpt-4o-mini-tts`), returning MP3 audio
   without word timestamps. The player uses estimated caption timing. `speaker` absent selects the narrator voice; `host`/`analyst` select
   the two podcast voices. All three are server configuration.

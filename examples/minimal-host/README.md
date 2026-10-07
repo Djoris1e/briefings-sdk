@@ -7,7 +7,7 @@ Two files show the complete integration surface:
 - `server.ts` builds the endpoint with `createBriefingHandler`, supplying host
   authentication, allowed origins, OpenAI Responses callbacks for text and
   planning, and OpenAI speech with separate podcast voices. The example uses
-  `gpt-6-luna` and `gpt-4o-mini-tts`; narrator/host use `marin`, analyst uses
+  `gpt-6-sol` and `gpt-4o-mini-tts`; narrator/host use `marin`, analyst uses
   `cedar`. Caption timing uses the SDK's estimated fallback.
 
 Set `OPENAI_API_KEY` and `BRIEFINGS_HOST_TOKEN` only on the server. Replace the

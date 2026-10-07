@@ -11,7 +11,7 @@
 import { createBriefingHandler, type BriefingHandlerOptions } from "@djoris/briefings/server";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
-const MODEL = "gpt-6-luna";
+const MODEL = "gpt-6-sol";
 const unavailable = () => new Error("Provider is temporarily unavailable.");
 
 /** Host authentication: replace with your session or token check. */

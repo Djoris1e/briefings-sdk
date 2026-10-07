@@ -14,7 +14,7 @@ PEXELS_API_KEY=
 
 # Models, voices and optional screenshot animation: briefing.config.ts.
 # Optional server environment overrides:
-# BRIEFING_PLANNER_MODEL=gpt-6-luna
+# BRIEFING_PLANNER_MODEL=gpt-6-sol
 # BRIEFING_REASONING_EFFORT=none
 # BRIEFING_SPEECH_MODEL=gpt-4o-mini-tts
 # BRIEFING_NARRATOR_VOICE=marin

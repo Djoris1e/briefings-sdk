@@ -39,9 +39,15 @@ five fal clips on localhost. Tests never use these keys.
 | `PEXELS_API_KEY` | Stock footage for scenes that are not generated |
 
 Models and voices are chosen in root `briefing.config.ts`
-(`defineBriefingConfig`). Trusted server overrides exist as environment
+(`defineBriefingConfig`). The SDK and example host default to `gpt-6-sol` with
+reasoning disabled for responses and planning, and `gpt-4o-mini-tts` for speech.
+Trusted server overrides exist as environment
 variables (`BRIEFING_PLANNER_MODEL`, `BRIEFING_HOST_VOICE`, …; see
 `.dev.vars.example`). Request bodies cannot select models, voices or keys.
+
+For Pexels-only local testing, set `VIDEO_CHAT_FAL_PREVIEW=disabled` in
+`.dev.vars`, keep `PEXELS_API_KEY` configured, and restart `npm run dev`.
+This prevents fal calls even when `FAL_KEY` is present; OpenAI calls still cost money.
 
 ## What happens with missing keys
 

@@ -6,7 +6,7 @@ describe("provider configuration", () => {
   it("keeps screenshot animation opt-in and separates podcast voices", () => {
     const defaults = defineBriefingConfig();
     expect(defaults.planner.provider).toBe("openai");
-    expect(defaults.planner.model).toBe("gpt-6-luna");
+    expect(defaults.planner.model).toBe("gpt-6-sol");
     expect(defaults.planner.reasoningEffort).toBe("none");
     expect(defaults.speech.provider).toBe("openai");
     expect(defaults.speech.model).toBe("gpt-4o-mini-tts");
