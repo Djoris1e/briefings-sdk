@@ -75,9 +75,13 @@ test("one admitted cinematic answer mixes templates, Pexels and capped AI footag
   assert.equal(response.headers.get("x-briefings-resolved-video-mode"), "cinematic");
   const events = await collect(response);
   const scenes = events.filter(event => event.type === "scene.add").map(event => event.data.scene);
-  assert.deepEqual(scenes.map(scene => scene.variables.mediaUrl ?? scene.templateId), ["https://videos.pexels.com/stock-1.mp4", "https://videos.pexels.com/stock-2.mp4",
-    "https://videos.pexels.com/stock-3.mp4", "https://v3.fal.media/1.mp4", "https://v3.fal.media/2.mp4", "https://v3.fal.media/3.mp4",
-    "https://videos.pexels.com/stock-4.mp4", "https://videos.pexels.com/stock-5.mp4", "https://videos.pexels.com/stock-6.mp4"]);
+  // Scene positions are deterministic; concurrent stock lookups may complete in
+  // either order, so the stock clip numbers are compared as a set.
+  const media = scenes.map(scene => scene.variables.mediaUrl ?? scene.templateId);
+  assert.deepEqual(media.map(url => url.includes("fal.media") ? "generated" : url.includes("pexels.com") ? "stock" : url),
+    ["stock", "stock", "stock", "generated", "generated", "generated", "stock", "stock", "stock"]);
+  assert.deepEqual(media.filter(url => url.includes("fal.media")), ["https://v3.fal.media/1.mp4", "https://v3.fal.media/2.mp4", "https://v3.fal.media/3.mp4"]);
+  assert.deepEqual(media.filter(url => url.includes("pexels.com")).sort(), Array.from({ length: 6 }, (_, index) => `https://videos.pexels.com/stock-${index + 1}.mp4`));
   assert.deepEqual(counters, { planning: 1, stock: 6, generated: 3, durations: [5, 8, 8] });
   assert.equal(env.VIDEO_CHAT_QUOTAS.sql.prepare("SELECT SUM(attempts) AS total FROM video_chat_fal_reservations").get().total, 3);
   assert.equal(env.VIDEO_CHAT_QUOTAS.sql.prepare("SELECT COUNT(*) AS count FROM video_chat_requests WHERE released = 0").get().count, 0);
