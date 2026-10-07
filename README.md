@@ -48,6 +48,12 @@ are chosen in `briefing.config.ts`. See [getting started](docs/getting-started.m
 
 ## Use the SDK
 
+`defineBriefingConfig()` defaults to OpenAI `gpt-6-sol` with reasoning disabled
+for responses and video planning, and `gpt-4o-mini-tts` for speech (`marin` for
+narrator/host, `cedar` for analyst). The reference adapters and minimal host use
+these defaults. Fal remains the generated-video provider; Pexels supplies stock
+footage. Hosts can override models or supply their own provider callbacks.
+
 ```bash
 npm run build:sdk
 npm pack

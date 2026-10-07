@@ -8,7 +8,7 @@ export interface BriefingProviderConfig {
 }
 export type BriefingProviderOptions = { [K in keyof BriefingProviderConfig]?: Partial<BriefingProviderConfig[K]> };
 export const DEFAULT_PROVIDER_CONFIG: BriefingProviderConfig = {
-  planner: { provider: "openai", model: "gpt-6-luna", reasoningEffort: "none", briefingTokens: 6144, briefingTimeoutMs: 90_000, videoTokens: 4096 },
+  planner: { provider: "openai", model: "gpt-6-sol", reasoningEffort: "none", briefingTokens: 6144, briefingTimeoutMs: 90_000, videoTokens: 4096 },
   speech: { provider: "openai", model: "gpt-4o-mini-tts", narrator: "marin", host: "marin", analyst: "cedar", language: "auto" },
   video: { provider: "fal", model: "minimax/h3-max-turbo/text-to-video", screenshotModel: "minimax/h3-max-turbo/image-to-video", animateScreenshots: false, resolution: "768P", timeoutMs: 45_000 },
   stock: { provider: "pexels" },

@@ -238,7 +238,7 @@ test("successful live operations use the fixed provider and bounded output token
         calls++;
         const payload = JSON.parse(options.body);
         assert.equal(url, "https://api.openai.com/v1/responses");
-        assert.equal(payload.model, "gpt-6-luna");
+        assert.equal(payload.model, "gpt-6-sol");
         assert.equal(payload.store, false);
         assert.deepEqual(payload.reasoning, { effort: "none" });
         assert.equal(options.headers.authorization, "Bearer test-only-value");

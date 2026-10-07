@@ -22,7 +22,7 @@ test('OpenAI requests keep credentials, prompts, storage, model and token ceilin
   assert.equal(request.options.signal, context.signal);
   assert.deepEqual(request.options.headers, { 'content-type': 'application/json', authorization: 'Bearer test-only' });
   assert.deepEqual(request.body, {
-    model: 'gpt-6-luna', max_output_tokens: 512, stream: false, store: false,
+    model: 'gpt-6-sol', max_output_tokens: 512, stream: false, store: false,
     reasoning: { effort: 'none' }, instructions: context.systemPrompt,
     input: [{ role: 'user', content: context.userPrompt }],
   });

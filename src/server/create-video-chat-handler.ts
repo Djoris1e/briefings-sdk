@@ -53,7 +53,8 @@ const DEFAULT_WELCOME_HERO = {
   posterUrl: "https://images.pexels.com/videos/11335959/pexels-photo-11335959.jpeg?auto=compress&fit=crop&w=1920",
 };
 const DEFAULT_MAX_AUDIO_BYTES = 8 * 1024 * 1024;
-const SPEECH_GENERATION_TIMEOUT_MS = 10_000;
+// Full speech audio can take longer than the first streamed bytes to arrive.
+const SPEECH_GENERATION_TIMEOUT_MS = 30_000;
 
 function cleanGeneratedText(value: string): string {
   return value.trim().replace(/^["']|["']$/g, "");

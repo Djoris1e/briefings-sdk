@@ -8,9 +8,9 @@ import { estimateNarrationSeconds } from "../protocol/clip-budget.js";
 import { parseSpeechWordTimings, type SpeechWordTiming } from "../protocol/speech-timing.js";
 
 const DEFAULT_MAX_CACHED_LINES = 60;
-// Leave room for the server's ten-second synthesis and timestamp-alignment
-// budget, plus network transfer and browser decoding.
-const SPEECH_PREPARATION_TIMEOUT_MS = 12_000;
+// Leave room for thirty-second synthesis, up to four seconds of admission
+// retry waits, network transfer and browser decoding.
+const SPEECH_PREPARATION_TIMEOUT_MS = 40_000;
 const FALLBACK_BITS_PER_SECOND = 128_000;
 const MAX_AUDIO_BYTES = 1024 * 1024;
 const MAX_DECODED_CACHE_BYTES = 32 * 1024 * 1024;

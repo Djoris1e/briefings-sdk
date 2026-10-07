@@ -199,7 +199,7 @@ Edit root `briefing.config.ts` for the reference application:
 import { defineBriefingConfig } from "./src/briefing/config";
 
 export default defineBriefingConfig({
-  planner: { model: "gpt-6-luna", reasoningEffort: "none" },
+  planner: { model: "gpt-6-sol", reasoningEffort: "none" },
   speech: { model: "gpt-4o-mini-tts", narrator: "marin", host: "marin", analyst: "cedar", language: "auto" },
   video: {
     model: "minimax/h3-max-turbo/text-to-video",
@@ -402,7 +402,7 @@ later scenes so generation can run ahead of playback. Source images keep their
 original aspect ratio and have source labels; generated and stock visuals are
 illustrations. Text-only treatment is a fallback when suitable media is
 unavailable. The opening chapter is visible immediately while the first useful
-scene is prepared. The demo selects `gpt-6-luna` with reasoning disabled in `briefing.config.ts`
+scene is prepared. The demo selects `gpt-6-sol` with reasoning disabled in `briefing.config.ts`
 for quick incremental planning; hosts can change the model and reasoning effort.
 Live output quality and latency must be assessed separately from fixture tests.
 

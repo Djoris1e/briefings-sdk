@@ -57,7 +57,7 @@ for (const format of ["text", "podcast"]) {
     assert.equal(calls[0].url, "https://api.openai.com/v1/responses");
     assert.equal(calls[0].body.stream, false);
     assert.equal(calls[0].body.max_output_tokens, 512);
-    assert.equal(calls[0].body.model, "gpt-6-luna");
+    assert.equal(calls[0].body.model, "gpt-6-sol");
     assert.deepEqual(JSON.parse(calls[0].body.input[0].content), { prompt });
     assert.equal(released(env), 0);
   });
